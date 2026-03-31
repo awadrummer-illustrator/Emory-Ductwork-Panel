@@ -26,6 +26,21 @@ namespace
 	const double kTrimMultiplier = 0.75;
 	const double kCollinearThreshold = 0.9848;
 	const double kRoundMinCenterlineRadiusMultiplier = 0.33;
+	const double kRoundBezierOuterHandleMultiplier = 2.5;
+	const double kRoundBezierMaxLongHandleScale = 3.0;
+	const double kRoundBezierShallowAngleStart = 3.141592653589793 * 0.5;
+	const double kRoundBezierShallowAngleEnd = 3.141592653589793 / 12.0;
+	const double kRoundBezierStandardHandleReduction = 0.85;
+	const double kRoundBezierLongHandlePreserveThreshold = 0.5;
+	const double kRoundBezierOuterReduceMinAngle = 40.0 * (3.141592653589793 / 180.0);
+	const double kRoundBezierOuterReduceMaxAngle = 50.0 * (3.141592653589793 / 180.0);
+	const double kRoundBezierInnerReduceMinAngle = 85.0 * (3.141592653589793 / 180.0);
+	const double kRoundBezierInnerReduceMaxAngle = 95.0 * (3.141592653589793 / 180.0);
+	const double kRoundBezierOuterTargetAngleReduction = 0.60;
+	const double kRoundBezierInnerTargetAngleReduction = 0.75;
+	const double kRoundBezierLargeEndHandleConvergeMax = 0.16;
+	const double kRoundBezierOuterChordCapMultiplier = 2.5;
+	const double kRoundBezierInnerChordCapMultiplier = 1.75;
 	const char* const kEmoryRoleKey = "MDUX_EmoryRole";
 	const char* const kEmorySourceIdKey = "MDUX_EmorySourceId";
 	const char* const kEmoryBodyWidthKey = "MDUX_EmoryBodyWidth";
@@ -232,6 +247,41 @@ namespace
 		result.x = point.x + (direction.x * distance);
 		result.y = point.y + (direction.y * distance);
 		return result;
+	}
+
+	DuctworkPoint Lerp(const DuctworkPoint& a, const DuctworkPoint& b, double t)
+	{
+		DuctworkPoint result;
+		result.x = a.x + ((b.x - a.x) * t);
+		result.y = a.y + ((b.y - a.y) * t);
+		return result;
+	}
+
+	DuctworkPoint EvaluateCubicBezier(const DuctworkPoint& p0, const DuctworkPoint& p1,
+		const DuctworkPoint& p2, const DuctworkPoint& p3, double t)
+	{
+		const DuctworkPoint a = Lerp(p0, p1, t);
+		const DuctworkPoint b = Lerp(p1, p2, t);
+		const DuctworkPoint c = Lerp(p2, p3, t);
+		const DuctworkPoint d = Lerp(a, b, t);
+		const DuctworkPoint e = Lerp(b, c, t);
+		return Lerp(d, e, t);
+	}
+
+	Vec2 EvaluateCubicBezierTangent(const DuctworkPoint& p0, const DuctworkPoint& p1,
+		const DuctworkPoint& p2, const DuctworkPoint& p3, double t)
+	{
+		const double omt = 1.0 - t;
+		Vec2 tangent;
+		tangent.x =
+			(3.0 * omt * omt * (p1.x - p0.x)) +
+			(6.0 * omt * t * (p2.x - p1.x)) +
+			(3.0 * t * t * (p3.x - p2.x));
+		tangent.y =
+			(3.0 * omt * omt * (p1.y - p0.y)) +
+			(6.0 * omt * t * (p2.y - p1.y)) +
+			(3.0 * t * t * (p3.y - p2.y));
+		return tangent;
 	}
 
 	bool NearlyEqual(double a, double b, double epsilon = kPointEpsilon)
@@ -504,10 +554,10 @@ namespace
 		return sAIArtStyle->SetArtStyle(art, defaultStyle) == kNoErr;
 	}
 
-	bool CreateClosedPath(AIArtHandle referenceArt, const std::vector<DuctworkPoint>& polygon, AIArtHandle& outPath)
+	bool CreateClosedPathSegments(AIArtHandle referenceArt, const std::vector<AIPathSegment>& segments, AIArtHandle& outPath)
 	{
 		outPath = nullptr;
-		if (!referenceArt || polygon.size() < 3 || !sAIArt || !sAIPath) {
+		if (!referenceArt || segments.size() < 3 || !sAIArt || !sAIPath) {
 			return false;
 		}
 
@@ -516,19 +566,10 @@ namespace
 			return false;
 		}
 
-		const ai::int16 segmentCount = static_cast<ai::int16>(polygon.size());
+		const ai::int16 segmentCount = static_cast<ai::int16>(segments.size());
 		if (sAIPath->SetPathSegmentCount(path, segmentCount) != kNoErr) {
 			sAIArt->DisposeArt(path);
 			return false;
-		}
-
-		std::vector<AIPathSegment> segments(polygon.size());
-		for (size_t i = 0; i < polygon.size(); ++i) {
-			segments[i].p.h = static_cast<AIReal>(polygon[i].x);
-			segments[i].p.v = static_cast<AIReal>(polygon[i].y);
-			segments[i].in = segments[i].p;
-			segments[i].out = segments[i].p;
-			segments[i].corner = true;
 		}
 
 		if (sAIPath->SetPathSegments(path, 0, segmentCount, &segments[0]) != kNoErr ||
@@ -540,6 +581,24 @@ namespace
 		sAIArt->SetArtUserAttr(path, kArtLocked | kArtHidden, 0);
 		outPath = path;
 		return true;
+	}
+
+	bool CreateClosedPath(AIArtHandle referenceArt, const std::vector<DuctworkPoint>& polygon, AIArtHandle& outPath)
+	{
+		if (polygon.size() < 3) {
+			outPath = nullptr;
+			return false;
+		}
+
+		std::vector<AIPathSegment> segments(polygon.size());
+		for (size_t i = 0; i < polygon.size(); ++i) {
+			segments[i].p.h = static_cast<AIReal>(polygon[i].x);
+			segments[i].p.v = static_cast<AIReal>(polygon[i].y);
+			segments[i].in = segments[i].p;
+			segments[i].out = segments[i].p;
+			segments[i].corner = true;
+		}
+		return CreateClosedPathSegments(referenceArt, segments, outPath);
 	}
 
 	bool ApplyFilledPathStyle(AIArtHandle art, const EmoryColorSpec& colors, double strokeWidth)
@@ -2162,125 +2221,45 @@ bool BuildRoundCornerPolygon(const ConnectorSpec& connector, const CornerPairing
 {
 	outPolygon.clear();
 
-	Vec2 axisA = connector.prevDir;
-	Vec2 axisB = connector.nextDir;
-	if (!Normalize(axisA, axisA) || !Normalize(axisB, axisB)) {
+	Vec2 startAxis = Scale(connector.prevDir, -1.0);
+	Vec2 endAxis = connector.nextDir;
+	if (!Normalize(startAxis, startAxis) || !Normalize(endAxis, endAxis)) {
 		return false;
 	}
 
-	struct ArcSide
-	{
-		Vec2 axis;
-		DuctworkPoint inner;
-		DuctworkPoint outer;
-		double width = 0.0;
-	};
-
-	const bool aMoreHorizontal = std::fabs(axisA.x) >= std::fabs(axisA.y);
-	ArcSide horiz;
-	ArcSide vert;
-	if (aMoreHorizontal) {
-		horiz.axis = axisA;
-		horiz.inner = pairing.startInner;
-		horiz.outer = pairing.startOuter;
-		horiz.width = connector.prevWidth;
-
-		vert.axis = axisB;
-		vert.inner = pairing.endInner;
-		vert.outer = pairing.endOuter;
-		vert.width = connector.nextWidth;
-	} else {
-		horiz.axis = axisB;
-		horiz.inner = pairing.endInner;
-		horiz.outer = pairing.endOuter;
-		horiz.width = connector.nextWidth;
-
-		vert.axis = axisA;
-		vert.inner = pairing.startInner;
-		vert.outer = pairing.startOuter;
-		vert.width = connector.prevWidth;
-	}
-
-	double trim_len = std::fabs(connector.trimDistance);
-	if (trim_len <= 0.0) {
-		trim_len = (std::max)(horiz.width, vert.width);
-	}
-	if (trim_len <= 0.0) {
-		return false;
-	}
-
-	Vec2 axisH = horiz.axis;
-	Vec2 axisV = vert.axis;
-	if (!Normalize(axisH, axisH) || !Normalize(axisV, axisV)) {
-		return false;
-	}
-
-	const double planeCross = Cross(axisH, axisV);
-	if (std::fabs(planeCross) <= 1e-6) {
-		return false;
-	}
-
-	const double theta = std::acos((std::max)(-1.0, (std::min)(1.0, Dot(axisV, axisH))));
+	const double theta = std::acos((std::max)(-1.0, (std::min)(1.0, Dot(startAxis, endAxis))));
 	if (!std::isfinite(theta) || theta <= 1e-3 || theta >= (3.141592653589793 - 1e-3)) {
 		return false;
 	}
 
-	const double half_theta = theta * 0.5;
-	const double sin_half = std::sin(half_theta);
-	if (std::fabs(sin_half) <= 1e-6) {
+	const DuctworkPoint startCenterline = connector.prevTrimPoint;
+	const DuctworkPoint endCenterline = connector.nextTrimPoint;
+	const double chordLength = std::hypot(endCenterline.x - startCenterline.x, endCenterline.y - startCenterline.y);
+	if (chordLength <= 1e-6) {
 		return false;
 	}
 
-	const double radius = trim_len * std::tan(half_theta);
-	Vec2 bisector_source;
-	bisector_source.x = axisV.x + axisH.x;
-	bisector_source.y = axisV.y + axisH.y;
-	Vec2 bisector;
-	if (!Normalize(bisector_source, bisector)) {
+	double handleFactor = (4.0 / 3.0) * std::tan(theta * 0.25);
+	if (!std::isfinite(handleFactor) || handleFactor <= 0.0) {
+		handleFactor = 0.35;
+	}
+	const double maxHandle = chordLength * 0.5;
+	double startHandle = connector.prevTrimDistance * handleFactor;
+	double endHandle = connector.nextTrimDistance * handleFactor;
+	if (startHandle > maxHandle) {
+		startHandle = maxHandle;
+	}
+	if (endHandle > maxHandle) {
+		endHandle = maxHandle;
+	}
+	if (startHandle <= 1e-6 || endHandle <= 1e-6) {
 		return false;
 	}
 
-	const double center_distance = radius / sin_half;
-	const DuctworkPoint center = Add(connector.joint, bisector, center_distance);
-	const DuctworkPoint start_centerline = Add(connector.joint, axisV, trim_len);
-	const DuctworkPoint end_centerline = Add(connector.joint, axisH, trim_len);
+	const DuctworkPoint control1 = Add(startCenterline, startAxis, startHandle);
+	const DuctworkPoint control2 = Add(endCenterline, endAxis, -endHandle);
 
-	Vec2 start_vec = Subtract(start_centerline, center);
-	Vec2 end_vec = Subtract(end_centerline, center);
-	const double radius_len = Length(start_vec);
-	if (radius_len <= 1e-6) {
-		return false;
-	}
-
-	Vec2 x_axis;
-	if (!Normalize(start_vec, x_axis)) {
-		return false;
-	}
-
-	Vec2 y_axis = planeCross >= 0.0 ? PerpCCW(x_axis) : PerpCW(x_axis);
-	if (!Normalize(y_axis, y_axis)) {
-		return false;
-	}
-
-	double end_x = Dot(end_vec, x_axis);
-	double end_y = Dot(end_vec, y_axis);
-	double angle_total = std::atan2(end_y, end_x);
-	if (angle_total <= 0.0) {
-		angle_total += (2.0 * 3.141592653589793);
-	}
-	if (angle_total > 3.141592653589793) {
-		y_axis = Scale(y_axis, -1.0);
-		end_y = Dot(end_vec, y_axis);
-		angle_total = std::atan2(end_y, end_x);
-		if (angle_total <= 0.0) {
-			angle_total += (2.0 * 3.141592653589793);
-		}
-	}
-	if (!std::isfinite(angle_total) || angle_total <= 1e-3 || angle_total > (3.141592653589793 + 1e-3)) {
-		return false;
-	}
-
-	int subdivisions = static_cast<int>(std::ceil(std::fabs(angle_total) / (3.141592653589793 / 12.0)));
+	int subdivisions = static_cast<int>(std::ceil(std::fabs(theta) / (3.141592653589793 / 12.0)));
 	if (subdivisions < 6) {
 		subdivisions = 6;
 	}
@@ -2296,26 +2275,23 @@ bool BuildRoundCornerPolygon(const ConnectorSpec& connector, const CornerPairing
 	bool orientationSet = false;
 	for (int i = 0; i <= subdivisions; ++i) {
 		const double t = static_cast<double>(i) / static_cast<double>(subdivisions);
-		const double angle = angle_total * t;
-
-		Vec2 vec1 = Scale(x_axis, radius_len * std::cos(angle));
-		Vec2 vec2 = Scale(y_axis, radius_len * std::sin(angle));
-		DuctworkPoint point = Add(center, vec1, 1.0);
-		point = Add(point, vec2, 1.0);
-
-		Vec2 radial = Subtract(point, center);
-		Vec2 width_vec;
-		if (!Normalize(radial, width_vec)) {
+		const DuctworkPoint point = EvaluateCubicBezier(startCenterline, control1, control2, endCenterline, t);
+		Vec2 tangent = EvaluateCubicBezierTangent(startCenterline, control1, control2, endCenterline, t);
+		if (!Normalize(tangent, tangent)) {
+			continue;
+		}
+		Vec2 width_vec = PerpCCW(tangent);
+		if (!Normalize(width_vec, width_vec)) {
 			continue;
 		}
 
-		const double width_current = vert.width + ((horiz.width - vert.width) * t);
+		const double width_current = connector.prevWidth + ((connector.nextWidth - connector.prevWidth) * t);
 		const double half_width = width_current * 0.5;
 		if (!orientationSet) {
 			const DuctworkPoint test_outer = Add(point, width_vec, half_width);
 			const DuctworkPoint test_inner = Add(point, width_vec, -half_width);
-			const double dist_outer = std::hypot(test_outer.x - vert.outer.x, test_outer.y - vert.outer.y);
-			const double dist_inner = std::hypot(test_inner.x - vert.outer.x, test_inner.y - vert.outer.y);
+			const double dist_outer = std::hypot(test_outer.x - pairing.startOuter.x, test_outer.y - pairing.startOuter.y);
+			const double dist_inner = std::hypot(test_inner.x - pairing.startOuter.x, test_inner.y - pairing.startOuter.y);
 			if (dist_inner < dist_outer) {
 				width_vec = Scale(width_vec, -1.0);
 			}
@@ -2330,10 +2306,10 @@ bool BuildRoundCornerPolygon(const ConnectorSpec& connector, const CornerPairing
 		return false;
 	}
 
-	outerPoints.front() = vert.outer;
-	outerPoints.back() = horiz.outer;
-	innerPoints.front() = vert.inner;
-	innerPoints.back() = horiz.inner;
+	outerPoints.front() = pairing.startOuter;
+	outerPoints.back() = pairing.endOuter;
+	innerPoints.front() = pairing.startInner;
+	innerPoints.back() = pairing.endInner;
 
 	for (size_t i = 0; i < outerPoints.size(); ++i) {
 		AppendIfDistinct(outPolygon, outerPoints[i]);
@@ -2343,6 +2319,170 @@ bool BuildRoundCornerPolygon(const ConnectorSpec& connector, const CornerPairing
 	}
 	return outPolygon.size() >= 4;
 }
+
+	bool BuildRoundCornerBezierSegments(const ConnectorSpec& connector, const CornerPairing& pairing,
+		std::vector<AIPathSegment>& outSegments)
+	{
+		outSegments.clear();
+
+		Vec2 startAxis = Scale(connector.prevDir, -1.0);
+		Vec2 endAxis = connector.nextDir;
+		if (!Normalize(startAxis, startAxis) || !Normalize(endAxis, endAxis)) {
+			return false;
+		}
+
+		const double theta = std::acos((std::max)(-1.0, (std::min)(1.0, Dot(startAxis, endAxis))));
+		if (!std::isfinite(theta) || theta <= 1e-3 || theta >= (3.141592653589793 - 1e-3)) {
+			return false;
+		}
+
+		double handleFactor = (4.0 / 3.0) * std::tan(theta * 0.25);
+		if (!std::isfinite(handleFactor) || handleFactor <= 0.0) {
+			return false;
+		}
+
+		double shallowT = 0.0;
+		if (theta < kRoundBezierShallowAngleStart) {
+			const double denom = kRoundBezierShallowAngleStart - kRoundBezierShallowAngleEnd;
+			shallowT = (kRoundBezierShallowAngleStart - theta) / denom;
+			if (shallowT < 0.0) {
+				shallowT = 0.0;
+			} else if (shallowT > 1.0) {
+				shallowT = 1.0;
+			}
+		}
+
+		const double maxSegmentWidth = (std::max)((std::max)(connector.prevWidth, connector.nextWidth), kMinDuctWidth);
+		const double avgTrimRatio = ((connector.prevTrimDistance + connector.nextTrimDistance) * 0.5) / maxSegmentWidth;
+		double longConnectorT = 0.0;
+		if (avgTrimRatio > kTrimMultiplier) {
+			const double denom = 3.0 - kTrimMultiplier;
+			longConnectorT = (avgTrimRatio - kTrimMultiplier) / denom;
+			if (longConnectorT < 0.0) {
+				longConnectorT = 0.0;
+			} else if (longConnectorT > 1.0) {
+				longConnectorT = 1.0;
+			}
+		}
+
+		const double longHandleStrength = (std::max)(shallowT, longConnectorT);
+		double handleReductionScale = kRoundBezierStandardHandleReduction;
+		if (longHandleStrength > 0.0) {
+			double preserveT = longHandleStrength / kRoundBezierLongHandlePreserveThreshold;
+			if (preserveT > 1.0) {
+				preserveT = 1.0;
+			}
+			handleReductionScale += (1.0 - kRoundBezierStandardHandleReduction) * preserveT;
+		}
+
+		const double connectorHandleScale =
+			(1.0 + ((kRoundBezierMaxLongHandleScale - 1.0) * longHandleStrength)) * handleReductionScale;
+
+		const double outerChord = std::hypot(pairing.endOuter.x - pairing.startOuter.x, pairing.endOuter.y - pairing.startOuter.y);
+		const double innerChord = std::hypot(pairing.startInner.x - pairing.endInner.x, pairing.startInner.y - pairing.endInner.y);
+		if (outerChord <= 1e-6 || innerChord <= 1e-6) {
+			return false;
+		}
+
+		double outerStartHandle = connector.prevTrimDistance * handleFactor * connectorHandleScale * kRoundBezierOuterHandleMultiplier;
+		double outerEndHandle = connector.nextTrimDistance * handleFactor * connectorHandleScale * kRoundBezierOuterHandleMultiplier;
+		double innerStartHandle = connector.prevTrimDistance * handleFactor * connectorHandleScale;
+		double innerEndHandle = connector.nextTrimDistance * handleFactor * connectorHandleScale;
+
+		if (theta >= kRoundBezierOuterReduceMinAngle && theta <= kRoundBezierOuterReduceMaxAngle) {
+			outerStartHandle *= kRoundBezierOuterTargetAngleReduction;
+			outerEndHandle *= kRoundBezierOuterTargetAngleReduction;
+		}
+		if (theta >= kRoundBezierInnerReduceMinAngle && theta <= kRoundBezierInnerReduceMaxAngle) {
+			innerStartHandle *= kRoundBezierInnerTargetAngleReduction;
+			innerEndHandle *= kRoundBezierInnerTargetAngleReduction;
+		}
+
+		const double outerMaxHandle = outerChord * kRoundBezierOuterChordCapMultiplier;
+		const double innerMaxHandle = innerChord * kRoundBezierInnerChordCapMultiplier;
+		if (outerStartHandle > outerMaxHandle) {
+			outerStartHandle = outerMaxHandle;
+		}
+		if (outerEndHandle > outerMaxHandle) {
+			outerEndHandle = outerMaxHandle;
+		}
+		if (innerStartHandle > innerMaxHandle) {
+			innerStartHandle = innerMaxHandle;
+		}
+		if (innerEndHandle > innerMaxHandle) {
+			innerEndHandle = innerMaxHandle;
+		}
+		if (outerStartHandle <= 1e-6 || outerEndHandle <= 1e-6 || innerStartHandle <= 1e-6 || innerEndHandle <= 1e-6) {
+			return false;
+		}
+
+		outSegments.resize(4);
+
+		outSegments[0].p.h = static_cast<AIReal>(pairing.startOuter.x);
+		outSegments[0].p.v = static_cast<AIReal>(pairing.startOuter.y);
+		DuctworkPoint outerStartOut = Add(pairing.startOuter, startAxis, outerStartHandle);
+		outSegments[0].out.h = static_cast<AIReal>(outerStartOut.x);
+		outSegments[0].out.v = static_cast<AIReal>(outerStartOut.y);
+		outSegments[0].in = outSegments[0].p;
+		outSegments[0].corner = true;
+
+		outSegments[1].p.h = static_cast<AIReal>(pairing.endOuter.x);
+		outSegments[1].p.v = static_cast<AIReal>(pairing.endOuter.y);
+		DuctworkPoint outerEndIn = Add(pairing.endOuter, endAxis, -outerEndHandle);
+		outSegments[1].in.h = static_cast<AIReal>(outerEndIn.x);
+		outSegments[1].in.v = static_cast<AIReal>(outerEndIn.y);
+		outSegments[1].out = outSegments[1].p;
+		outSegments[1].corner = true;
+
+		outSegments[2].p.h = static_cast<AIReal>(pairing.endInner.x);
+		outSegments[2].p.v = static_cast<AIReal>(pairing.endInner.y);
+		outSegments[2].in = outSegments[2].p;
+		DuctworkPoint innerStartOut = Add(pairing.endInner, endAxis, -innerEndHandle);
+		outSegments[2].out.h = static_cast<AIReal>(innerStartOut.x);
+		outSegments[2].out.v = static_cast<AIReal>(innerStartOut.y);
+		outSegments[2].corner = true;
+
+		outSegments[3].p.h = static_cast<AIReal>(pairing.startInner.x);
+		outSegments[3].p.v = static_cast<AIReal>(pairing.startInner.y);
+		DuctworkPoint innerEndIn = Add(pairing.startInner, startAxis, innerStartHandle);
+		outSegments[3].in.h = static_cast<AIReal>(innerEndIn.x);
+		outSegments[3].in.v = static_cast<AIReal>(innerEndIn.y);
+		outSegments[3].out = outSegments[3].p;
+		outSegments[3].corner = true;
+
+		const double largerWidth = (std::max)(connector.prevWidth, connector.nextWidth);
+		const double smallerWidth = (std::min)(connector.prevWidth, connector.nextWidth);
+		if (largerWidth - smallerWidth > 1e-6 && largerWidth > 1e-6) {
+			double convergeT = ((largerWidth - smallerWidth) / largerWidth) * kRoundBezierLargeEndHandleConvergeMax;
+			if (convergeT > kRoundBezierLargeEndHandleConvergeMax) {
+				convergeT = kRoundBezierLargeEndHandleConvergeMax;
+			}
+
+			if (connector.prevWidth > connector.nextWidth) {
+				const DuctworkPoint startMid = Lerp(pairing.startOuter, pairing.startInner, 0.5);
+				const DuctworkPoint outerTarget = Add(startMid, startAxis, outerStartHandle);
+				const DuctworkPoint innerTarget = Add(startMid, startAxis, innerStartHandle);
+				outerStartOut = Lerp(outerStartOut, outerTarget, convergeT);
+				innerEndIn = Lerp(innerEndIn, innerTarget, convergeT);
+				outSegments[0].out.h = static_cast<AIReal>(outerStartOut.x);
+				outSegments[0].out.v = static_cast<AIReal>(outerStartOut.y);
+				outSegments[3].in.h = static_cast<AIReal>(innerEndIn.x);
+				outSegments[3].in.v = static_cast<AIReal>(innerEndIn.y);
+			} else if (connector.nextWidth > connector.prevWidth) {
+				const DuctworkPoint endMid = Lerp(pairing.endOuter, pairing.endInner, 0.5);
+				const DuctworkPoint outerTarget = Add(endMid, endAxis, -outerEndHandle);
+				const DuctworkPoint innerTarget = Add(endMid, endAxis, -innerEndHandle);
+				outerEndIn = Lerp(outerEndIn, outerTarget, convergeT);
+				innerStartOut = Lerp(innerStartOut, innerTarget, convergeT);
+				outSegments[1].in.h = static_cast<AIReal>(outerEndIn.x);
+				outSegments[1].in.v = static_cast<AIReal>(outerEndIn.y);
+				outSegments[2].out.h = static_cast<AIReal>(innerStartOut.x);
+				outSegments[2].out.v = static_cast<AIReal>(innerStartOut.y);
+			}
+		}
+
+		return true;
+	}
 
 	bool BuildConnectorPolygon(const ConnectorSpec& connector, std::vector<DuctworkPoint>& outPolygon)
 	{
@@ -2599,19 +2739,30 @@ bool BuildRoundCornerPolygon(const ConnectorSpec& connector, const CornerPairing
 					}
 				}
 			}
-			const double maxAllowed = ((std::min)(prevLength, nextLength) * 0.5) - 0.1;
-			if (maxAllowed <= 0.1) {
+			double prevTrimDistance = trimDistance;
+			double nextTrimDistance = trimDistance;
+			if (jointBodyWidth > 0.0) {
+				prevTrimDistance *= prevSegmentWidth / jointBodyWidth;
+				nextTrimDistance *= nextSegmentWidth / jointBodyWidth;
+			}
+
+			const double prevMaxAllowed = (prevLength * 0.5) - 0.1;
+			const double nextMaxAllowed = (nextLength * 0.5) - 0.1;
+			if (prevMaxAllowed <= 0.1 || nextMaxAllowed <= 0.1) {
 				continue;
 			}
-			if (trimDistance > maxAllowed) {
-				trimDistance = maxAllowed;
+			if (prevTrimDistance > prevMaxAllowed) {
+				prevTrimDistance = prevMaxAllowed;
 			}
-			if (trimDistance <= 0.1) {
+			if (nextTrimDistance > nextMaxAllowed) {
+				nextTrimDistance = nextMaxAllowed;
+			}
+			if (prevTrimDistance <= 0.1 || nextTrimDistance <= 0.1) {
 				continue;
 			}
 
-			trimAtEnd[jointIndex - 1] = (std::max)(trimAtEnd[jointIndex - 1], trimDistance);
-			trimAtStart[jointIndex] = (std::max)(trimAtStart[jointIndex], trimDistance);
+			trimAtEnd[jointIndex - 1] = (std::max)(trimAtEnd[jointIndex - 1], prevTrimDistance);
+			trimAtStart[jointIndex] = (std::max)(trimAtStart[jointIndex], nextTrimDistance);
 
 			ConnectorSpec connector;
 			connector.sourceArt = path.art;
@@ -2619,15 +2770,15 @@ bool BuildRoundCornerPolygon(const ConnectorSpec& connector, const CornerPairing
 			connector.layerName = path.layerName;
 			connector.jointIndex = static_cast<int>(jointIndex);
 			connector.joint = points[jointIndex];
-			connector.prevTrimPoint = Add(points[jointIndex], prevDir, trimDistance);
-			connector.nextTrimPoint = Add(points[jointIndex], nextDir, trimDistance);
+			connector.prevTrimPoint = Add(points[jointIndex], prevDir, prevTrimDistance);
+			connector.nextTrimPoint = Add(points[jointIndex], nextDir, nextTrimDistance);
 			connector.prevDir = prevDir;
 			connector.nextDir = nextDir;
 			connector.prevWidth = prevSegmentWidth;
 			connector.nextWidth = nextSegmentWidth;
-			connector.prevTrimDistance = trimDistance;
-			connector.nextTrimDistance = trimDistance;
-			connector.trimDistance = trimDistance;
+			connector.prevTrimDistance = prevTrimDistance;
+			connector.nextTrimDistance = nextTrimDistance;
+			connector.trimDistance = (std::min)(prevTrimDistance, nextTrimDistance);
 			connector.style = connectorStyle;
 			connectors.push_back(connector);
 		}
@@ -2690,14 +2841,31 @@ bool BuildRoundCornerPolygon(const ConnectorSpec& connector, const CornerPairing
 		}
 
 		for (size_t i = 0; i < connectors.size(); ++i) {
-			std::vector<DuctworkPoint> polygon;
-			if (!BuildConnectorPolygon(connectors[i], polygon)) {
-				++stats.failed;
-				continue;
-			}
-
 			AIArtHandle connectorArt = nullptr;
-			if (!CreateClosedPath(referenceArt, polygon, connectorArt) || !connectorArt) {
+			bool createdConnector = false;
+			if (connectors[i].style == "round") {
+				CornerPairing pairing;
+				std::vector<AIPathSegment> segments;
+				if (BuildCornerPairing(connectors[i], pairing) &&
+					BuildRoundCornerBezierSegments(connectors[i], pairing, segments) &&
+					CreateClosedPathSegments(referenceArt, segments, connectorArt) &&
+					connectorArt) {
+					createdConnector = true;
+				}
+			}
+			if (!createdConnector) {
+				std::vector<DuctworkPoint> polygon;
+				if (!BuildConnectorPolygon(connectors[i], polygon)) {
+					++stats.failed;
+					continue;
+				}
+				if (!CreateClosedPath(referenceArt, polygon, connectorArt) || !connectorArt) {
+					++stats.failed;
+					continue;
+				}
+				createdConnector = true;
+			}
+			if (!createdConnector || !connectorArt) {
 				++stats.failed;
 				continue;
 			}
