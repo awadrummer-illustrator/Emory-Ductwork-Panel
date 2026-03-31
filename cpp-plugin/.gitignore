@@ -1,0 +1,21 @@
+# Build outputs
+/build/
+
+# SDK drop
+/sdk/
+
+# Visual Studio
+/.vs/
+*.suo
+*.user
+*.userosscache
+*.sln.docstates
+*.VC.db
+*.VC.opendb
+
+# Tooling
+*.log
+
+# Test files
+/Test Illustrator Files/Test Small archive.ai
+/Test Illustrator Files/Test Small_preortho.ai

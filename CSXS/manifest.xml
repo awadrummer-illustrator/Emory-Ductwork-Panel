@@ -1,0 +1,91 @@
+﻿<?xml version="1.0" encoding="UTF-8"?>
+<ExtensionManifest Version="11.0" ExtensionBundleId="com.chris.emoryductwork.bundle" ExtensionBundleVersion="1.0.0" ExtensionBundleName="Emory Ductwork Panel">
+    <ExtensionList>
+        <Extension Id="com.chris.emoryductwork.panel" Version="1.0.0"/>
+        <Extension Id="com.chris.emoryductwork.movepanel" Version="1.0.0"/>
+    </ExtensionList>
+    <ExecutionEnvironment>
+        <HostList>
+            <Host Name="ILST" Version="[24.0,99.9]"/>
+        </HostList>
+        <LocaleList>
+            <Locale Code="All"/>
+        </LocaleList>
+        <RequiredRuntimeList>
+            <RequiredRuntime Name="CSXS" Version="11.0"/>
+        </RequiredRuntimeList>
+    </ExecutionEnvironment>
+    <DispatchInfoList>
+        <Extension Id="com.chris.emoryductwork.panel">
+            <DispatchInfo>
+                <Resources>
+                    <MainPath>./index.html</MainPath>
+                    <ScriptPath>./jsx/panel-bridge.jsx</ScriptPath>
+                    <CEFCommandLine>
+                        <Parameter>--allow-file-access-from-files</Parameter>
+                        <Parameter>--remote-debugging-port=8088</Parameter>
+                        <Parameter>--enable-nodejs</Parameter>
+                        <Parameter>--mixed-context</Parameter>
+                    </CEFCommandLine>
+                </Resources>
+                <Lifecycle>
+                    <AutoVisible>true</AutoVisible>
+                </Lifecycle>
+                <UI>
+                    <Type>Panel</Type>
+                    <Menu>Emory Ductwork Panel</Menu>
+                    <Geometry>
+                        <Size>
+                            <Height>420</Height>
+                            <Width>340</Width>
+                        </Size>
+                        <MinSize>
+                            <Height>220</Height>
+                            <Width>255</Width>
+                        </MinSize>
+                        <MaxSize>
+                            <Height>1080</Height>
+                            <Width>720</Width>
+                        </MaxSize>
+                    </Geometry>
+                </UI>
+            </DispatchInfo>
+        </Extension>
+        <Extension Id="com.chris.emoryductwork.movepanel">
+            <DispatchInfo>
+                <Resources>
+                    <MainPath>./move-panel.html</MainPath>
+                    <ScriptPath>./jsx/panel-bridge.jsx</ScriptPath>
+                    <CEFCommandLine>
+                        <Parameter>--allow-file-access-from-files</Parameter>
+                        <Parameter>--remote-debugging-port=8089</Parameter>
+                        <Parameter>--enable-nodejs</Parameter>
+                        <Parameter>--mixed-context</Parameter>
+                    </CEFCommandLine>
+                </Resources>
+                <Lifecycle>
+                    <AutoVisible>true</AutoVisible>
+                </Lifecycle>
+                <UI>
+                    <Type>Panel</Type>
+                    <Menu>Move Selection To Layer</Menu>
+                    <Geometry>
+                        <Size>
+                            <Height>200</Height>
+                            <Width>220</Width>
+                        </Size>
+                        <MinSize>
+                            <Height>120</Height>
+                            <Width>49</Width>
+                        </MinSize>
+                        <MaxSize>
+                            <Height>600</Height>
+                            <Width>400</Width>
+                        </MaxSize>
+                    </Geometry>
+                </UI>
+            </DispatchInfo>
+        </Extension>
+    </DispatchInfoList>
+</ExtensionManifest>
+

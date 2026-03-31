@@ -1,0 +1,53 @@
+﻿.DS_Store
+Thumbs.db
+*.log
+*.tmp
+
+# Claude Code development folder
+.claude/
+
+# Debug files
+js/debug-location.jsx
+jsx/debug.log
+.debug
+.agent/
+
+# Dependencies
+node_modules/
+
+# Python cache
+__pycache__/
+*.pyc
+
+# Deployment instructions (not part of extension)
+DEPLOYMENT_INSTRUCTIONS.md
+index.html.bak
+css/style.css.bak
+
+# Standalone scripts (not part of extension)
+jsx/Generate 2K, 4K, 8K Renders With Automatic Compression.jsx
+check_log.txt
+debug_out.txt
+err_log.txt
+_tmp_dev/Emory-Ductwork-Panel/index.html
+_tmp_dev/Emory-Ductwork-Panel/js/panel.js
+
+# Auto Claude data directory
+.auto-claude/
+
+# Temporary Codex/Claude artifacts
+*.ps1
+!cpp-plugin/tools/*.ps1
+tmpclaude-*-cwd
+conversation-extract.txt
+conversation-full.txt
+conversation-yesterday.txt
+temp_old_gap_tools.jsx
+
+# Windows shortcuts
+*.lnk
+
+# Python reproduce/test scripts
+python/reproduce_*.py
+python/reproduce_*.txt
+

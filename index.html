@@ -1,0 +1,722 @@
+﻿<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <title>Emory Ductwork</title>
+    <link rel="stylesheet" href="css/style.css">
+    <script src="js/libs/CSInterface.js"></script>
+    <script src="js/geometry-bridge.js"></script>
+    <script src="js/python-client.js"></script>
+    <script src="js/panel.js" defer></script>
+    <script>
+        (function () {
+            try {
+                var logPath = "C:/Users/Chris/AppData/Roaming/Adobe/CEP/extensions/Emory-Ductwork-Panel/panel-html.log";
+                function writeLog(msg) {
+                    try {
+                        if (window.cep && window.cep.fs && window.cep.fs.writeFile) {
+                            var read = window.cep.fs.readFile(logPath);
+                            var prev = read && read.err === 0 ? read.data : "";
+                            window.cep.fs.writeFile(logPath, prev + msg + "\n");
+                        }
+                    } catch (e) {}
+                }
+                window.MDUX_htmlLog = writeLog;
+                if (window.cep && window.cep.fs && window.cep.fs.writeFile) {
+                    writeLog("[BOOT] index.html loaded " + new Date().toString());
+                }
+                window.addEventListener('error', function (event) {
+                    var msg = String(event && event.message ? event.message : event);
+                    writeLog("[HTML ERROR] " + msg);
+                });
+                setTimeout(function () {
+                    writeLog("[CHECK] panel.js loaded flag=" + (window.MDUX_PANEL_JS_LOADED ? "true" : "false"));
+                }, 1500);
+            } catch (e) {}
+        })();
+    </script>
+</head>
+
+<body>
+    <img src="panel-background.png" class="bg-image" alt="">
+
+    <!-- Lock/Unlock Sections Toggle (Top Right) -->
+    <button id="section-lock-toggle" class="section-lock-toggle" title="Lock/Unlock Section Reordering">
+        <svg id="lock-icon-locked" xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <rect x="3" y="11" width="18" height="11" rx="2" ry="2"></rect>
+            <path d="M7 11V7a5 5 0 0 1 10 0v4"></path>
+        </svg>
+        <svg id="lock-icon-unlocked" xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="display:none;">
+            <rect x="3" y="11" width="18" height="11" rx="2" ry="2"></rect>
+            <path d="M7 11V7a5 5 0 0 1 9.9-1"></path>
+        </svg>
+    </button>
+
+    <!-- Refresh Button (Top Right) -->
+    <button id="refresh-btn-top" class="refresh-btn-top" title="Reload Extension (F5)">
+        <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <polyline points="23 4 23 10 17 10"></polyline>
+            <polyline points="1 20 1 14 7 14"></polyline>
+            <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"></path>
+        </svg>
+    </button>
+
+    <div class="content-scroll">
+        <main class="main-frame">
+
+            <!-- ============================================ -->
+            <!-- PANEL 1: PROCESS DUCTWORK -->
+            <!-- ============================================ -->
+            <div class="accordion-section expanded" id="section-process-ductwork">
+                <div class="accordion-header" data-section="section-process-ductwork">
+                    <svg class="drag-handle" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor"><circle cx="9" cy="6" r="1.5"/><circle cx="15" cy="6" r="1.5"/><circle cx="9" cy="12" r="1.5"/><circle cx="15" cy="12" r="1.5"/><circle cx="9" cy="18" r="1.5"/><circle cx="15" cy="18" r="1.5"/></svg>
+                    <span class="accordion-icon">â–¼</span>
+                    <span class="accordion-title">Process Emory Ductwork</span>
+                </div>
+                <div class="accordion-content">
+                    <!-- Process Ductwork Button (100% width) -->
+                    <button id="process-btn" class="btn-primary-glow" style="display:none;">Process Ductwork Legacy</button>
+                    <button id="process-placed-btn" class="btn-primary-glow">Process Emory Ductwork</button>
+                    <button id="toggle-connector-style-btn" style="width: 100%; margin-top: 4px;">Toggle Selected Connector Style</button>
+                    <p id="emory-scaffold-note" class="status">Native Emory processing builds separate duct segments and connector pieces from selected centerlines and can be rerun after edits.</p>
+
+                    <!-- Process ortho options -->
+                    <div class="process-options-row" id="process-ortho-options">
+                        <label class="process-option">
+                            <input type="checkbox" id="process-skip-ortho-option">
+                            <span>No Ortho</span>
+                        </label>
+                        <label class="process-option">
+                            <input type="checkbox" id="process-skip-all-branches-option">
+                            <span>No Ortho Branches</span>
+                        </label>
+                        <label class="process-option">
+                            <input type="checkbox" id="process-skip-final-option">
+                            <span>No Ortho Final</span>
+                        </label>
+                    </div>
+
+                    <!-- Process options checkboxes (all OFF by default) -->
+                    <div class="process-options-row">
+                        <label class="process-option">
+                            <input type="checkbox" id="process-rotate-registers-option">
+                            <span>Rotate Registers</span>
+                        </label>
+                        <label class="process-option">
+                            <input type="checkbox" id="process-carve-registers-option">
+                            <span>Carve Registers</span>
+                        </label>
+                        <label class="process-option">
+                            <input type="checkbox" id="process-carve-overlaps-option">
+                            <span>Carve Overlaps</span>
+                        </label>
+                    </div>
+
+                    <!-- Secondary buttons row -->
+                    <div class="btn-row-thirds">
+                        <button id="rotate-registers-btn" title="Rotate registers to match ductwork angles">Rotate Registers</button>
+                        <button id="carve-registers-btn" title="Carve ductwork lines for register placement">Carve for Registers</button>
+                        <button id="carve-overlaps-btn" title="Carve overlapping ductwork lines">Carve Overlaps</button>
+                    </div>
+
+                    <!-- Rotation Override -->
+                    <div class="rotation-override">
+                        <label for="rotation-input">Rotation override (Â°):</label>
+                        <div class="rotation-input-group">
+                            <input type="text" id="rotation-input" class="rotation-input" placeholder="Auto" inputmode="decimal">
+                            <button type="button" id="get-angle-btn">Get Angle</button>
+                            <button type="button" id="clear-rotation-btn">Clear</button>
+                        </div>
+                    </div>
+
+                    <!-- Revert / Clear Metadata -->
+                    <div class="btn-row">
+                        <button id="revert-ortho-btn">Revert Pre-Ortho</button>
+                        <button id="clear-rotation-metadata-btn">Clear Rotation Metadata</button>
+                    </div>
+
+                    <!-- Status Messages -->
+                    <p id="process-status" class="status"></p>
+                    <p id="revert-status" class="status"></p>
+                    <p id="clear-rotation-metadata-status" class="status"></p>
+
+                    <!-- Hidden elements for backwards compatibility -->
+                    <button id="process-emory-btn" style="display:none;">Process Ductwork Emory</button>
+                    <input type="checkbox" id="create-register-wires-option" style="display:none;">
+                    <input type="checkbox" id="skip-register-rotation-option" style="display:none;">
+                    <input type="checkbox" id="enable-register-carve-option" style="display:none;">
+                    <input type="checkbox" id="enable-overlap-carve-option" style="display:none;" checked>
+                </div>
+            </div>
+
+            <!-- ============================================ -->
+            <!-- PANEL 2: ORTHOGONALIZE -->
+            <!-- ============================================ -->
+            <div class="accordion-section" id="section-orthogonalize">
+                <div class="accordion-header" data-section="section-orthogonalize">
+                    <svg class="drag-handle" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor"><circle cx="9" cy="6" r="1.5"/><circle cx="15" cy="6" r="1.5"/><circle cx="9" cy="12" r="1.5"/><circle cx="15" cy="12" r="1.5"/><circle cx="9" cy="18" r="1.5"/><circle cx="15" cy="18" r="1.5"/></svg>
+                    <span class="accordion-icon">â–¶</span>
+                    <span class="accordion-title">Orthogonalize</span>
+                </div>
+                <div class="accordion-content" style="display: none;">
+                    <!-- Top Toggle Buttons (legacy ortho options) -->
+                    <div class="toggle-grid" id="ortho-toggle-grid">
+                        <div class="toggle-btn-wrapper">
+                            <input type="checkbox" id="skip-ortho-option" class="ortho-toggle">
+                            <label for="skip-ortho-option" class="toggle-btn">
+                                <img src="button_images/No Ortho.png" alt="No Ortho" class="toggle-img">
+                            </label>
+                        </div>
+                        <div class="toggle-btn-wrapper">
+                            <input type="checkbox" id="skip-all-branches-option" class="ortho-toggle">
+                            <label for="skip-all-branches-option" class="toggle-btn">
+                                <img src="button_images/No Ortho Branches.png" alt="No Ortho Branches" class="toggle-img">
+                            </label>
+                        </div>
+                        <div class="toggle-btn-wrapper">
+                            <input type="checkbox" id="skip-final-option" class="ortho-toggle">
+                            <label for="skip-final-option" class="toggle-btn">
+                                <img src="button_images/No Ortho Final.png" alt="No Ortho Final" class="toggle-img">
+                            </label>
+                        </div>
+                    </div>
+
+                    <!-- Ortho Buttons -->
+                    <div class="btn-row">
+                        <button id="ortho-trunk-btn">Ortho Trunk</button>
+                        <button id="ortho-branches-btn">Ortho Branches</button>
+                    </div>
+                    <div class="btn-row">
+                        <button id="ortho-final-btn">Ortho Final Segment</button>
+                        <button id="ortho-all-btn" class="btn-accent">Ortho All</button>
+                    </div>
+
+                    <p id="ortho-status" class="status"></p>
+                </div>
+            </div>
+
+            <!-- ============================================ -->
+            <!-- PANEL 3: CREATE/UPDATE DUCTWORK PARTS -->
+            <!-- ============================================ -->
+            <div class="accordion-section" id="section-ductwork-parts">
+                <div class="accordion-header" data-section="section-ductwork-parts">
+                    <svg class="drag-handle" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor"><circle cx="9" cy="6" r="1.5"/><circle cx="15" cy="6" r="1.5"/><circle cx="9" cy="12" r="1.5"/><circle cx="15" cy="12" r="1.5"/><circle cx="9" cy="18" r="1.5"/><circle cx="15" cy="18" r="1.5"/></svg>
+                    <span class="accordion-icon">â–¶</span>
+                    <span class="accordion-title">Create/Update Ductwork Parts</span>
+                </div>
+                <div class="accordion-content" style="display: none;">
+                    <!-- Primary actions -->
+                    <button id="create-update-parts-btn" class="btn-primary-glow" style="margin-bottom: 4px;">Create/Update Ductwork Parts</button>
+                    <button id="create-anchors-btn" style="width: 100%; margin-bottom: 4px;">Create Part Anchors Only</button>
+
+                    <!-- Selection tools -->
+                    <div class="btn-row">
+                        <button id="select-parts-btn">Select Parts</button>
+                        <button id="select-anchors-btn">Select Anchors</button>
+                    </div>
+                    <div class="btn-row">
+                        <button id="delete-anchors-btn" style="border-color: var(--accent-color); color: var(--accent-color);">Delete Anchors</button>
+                        <button id="place-graphics-btn">Place Graphics</button>
+                    </div>
+
+                    <p id="parts-status" class="status"></p>
+                </div>
+            </div>
+
+            <!-- ============================================ -->
+            <!-- PANEL 4: TRANSFORM -->
+            <!-- ============================================ -->
+            <div class="accordion-section" id="section-transform">
+                <div class="accordion-header" data-section="section-transform">
+                    <svg class="drag-handle" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor"><circle cx="9" cy="6" r="1.5"/><circle cx="15" cy="6" r="1.5"/><circle cx="9" cy="12" r="1.5"/><circle cx="15" cy="12" r="1.5"/><circle cx="9" cy="18" r="1.5"/><circle cx="15" cy="18" r="1.5"/></svg>
+                    <span class="accordion-icon">â–¶</span>
+                    <span class="accordion-title">Transform</span>
+                </div>
+                <div class="accordion-content" style="display: none;">
+                    <!-- Reset buttons -->
+                    <div class="btn-row" style="margin-bottom: 8px;">
+                        <button id="reset-strokes-btn">Reset Strokes</button>
+                        <button id="reset-parts-scale-btn">Reset Scale</button>
+                        <button id="reset-parts-rotation-btn">Reset Rotation</button>
+                    </div>
+
+                    <!-- Scale slider -->
+                    <div class="slider-row">
+                        <span class="slider-label">Scale (%):</span>
+                        <input type="range" id="te-scale-slider" min="10" max="400" value="100">
+                        <input type="number" id="te-scale" value="100" step="1" style="width: 45px;">
+                    </div>
+
+                    <!-- Rotate slider -->
+                    <div class="slider-row">
+                        <span class="slider-label">Rotate (Â°):</span>
+                        <input type="range" id="te-rotate-slider" min="-180" max="180" value="0">
+                        <input type="number" id="te-rotate" value="0" step="1" style="width: 45px;">
+                    </div>
+
+                    <!-- Live Preview checkbox (OFF by default per spec) -->
+                    <div class="checkbox-row">
+                        <input type="checkbox" id="te-live-option">
+                        <label for="te-live-option">Live Preview</label>
+                    </div>
+
+                    <!-- Apply button -->
+                    <div class="btn-row">
+                        <button id="transform-each-btn" class="btn-primary-glow" style="margin-bottom: 0;">Apply Transform</button>
+                        <button id="te-reset-original-btn">Reset to Original</button>
+                    </div>
+
+                    <p id="selection-status" class="status" style="margin-top: 5px; color: var(--accent-color); font-weight: bold;"></p>
+                </div>
+            </div>
+
+            <!-- ============================================ -->
+            <!-- PANEL 5: QUICK ROTATE -->
+            <!-- ============================================ -->
+            <div class="accordion-section" id="section-quick-rotate">
+                <div class="accordion-header" data-section="section-quick-rotate">
+                    <svg class="drag-handle" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor"><circle cx="9" cy="6" r="1.5"/><circle cx="15" cy="6" r="1.5"/><circle cx="9" cy="12" r="1.5"/><circle cx="15" cy="12" r="1.5"/><circle cx="9" cy="18" r="1.5"/><circle cx="15" cy="18" r="1.5"/></svg>
+                    <span class="accordion-icon">â–¶</span>
+                    <span class="accordion-title">Quick Rotate</span>
+                </div>
+                <div class="accordion-content" style="display: none;">
+                    <div class="quick-rotate-grid">
+                        <button id="rotate-45-btn">45Â°</button>
+                        <button id="rotate-90-btn">90Â°</button>
+                        <button id="rotate-180-btn">180Â°</button>
+                    </div>
+                    <div class="quick-rotate-grid" style="margin-top: 4px;">
+                        <button id="rotate-neg45-btn">-45Â°</button>
+                        <button id="rotate-neg90-btn">-90Â°</button>
+                        <button id="rotate-custom-btn">Custom...</button>
+                    </div>
+                    <p id="quick-rotate-status" class="status"></p>
+                </div>
+            </div>
+
+            <!-- ============================================ -->
+            <!-- PANEL 6: LAYER MANAGEMENT -->
+            <!-- ============================================ -->
+            <div class="accordion-section" id="section-layer-management">
+                <div class="accordion-header" data-section="section-layer-management">
+                    <svg class="drag-handle" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor"><circle cx="9" cy="6" r="1.5"/><circle cx="15" cy="6" r="1.5"/><circle cx="9" cy="12" r="1.5"/><circle cx="15" cy="12" r="1.5"/><circle cx="9" cy="18" r="1.5"/><circle cx="15" cy="18" r="1.5"/></svg>
+                    <span class="accordion-icon">â–¶</span>
+                    <span class="accordion-title">Layer Management</span>
+                </div>
+                <div class="accordion-content" style="display: none;">
+                    <div class="layer-buttons-grid">
+                        <button id="isolate-parts-btn">Isolate Ductwork Parts</button>
+                        <button id="isolate-lines-btn">Isolate Ductwork Lines</button>
+                        <button id="create-layers-btn" style="color: var(--success-color); border-color: var(--success-color);">Create Standard Layers</button>
+                        <button id="import-styles-btn" style="color: var(--success-color); border-color: var(--success-color);">Import Graphic Styles</button>
+                    </div>
+                    <button id="unlock-ductwork-btn" style="width: 100%; margin-top: 4px; border-color: var(--success-color); color: var(--success-color);">
+                        Unlock All Ductwork Layers
+                    </button>
+                    <p id="layer-status" class="status"></p>
+                    <p id="import-status" class="status"></p>
+                </div>
+            </div>
+
+            <!-- ============================================ -->
+            <!-- PANEL 7: GAP TOOLS -->
+            <!-- ============================================ -->
+            <div class="accordion-section" id="section-gap-tools" style="border-color: #f0f;">
+                <div class="accordion-header" data-section="section-gap-tools" style="color: #f0f;">
+                    <svg class="drag-handle" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor"><circle cx="9" cy="6" r="1.5"/><circle cx="15" cy="6" r="1.5"/><circle cx="9" cy="12" r="1.5"/><circle cx="15" cy="12" r="1.5"/><circle cx="9" cy="18" r="1.5"/><circle cx="15" cy="18" r="1.5"/></svg>
+                    <span class="accordion-icon">â–¶</span>
+                    <span class="accordion-title">Gap Tools</span>
+                </div>
+                <div class="accordion-content" style="display: none; background: rgba(40, 0, 40, 0.3);">
+                    <!-- Gap Editor Overlay Controls -->
+                    <div id="gap-editor-normal" style="margin: 6px 0;">
+                        <button id="edit-gaps-btn" style="width: 100%; background: #606; border-color: #f0f;">Edit Gap Definitions</button>
+                    </div>
+                    <div id="gap-editor-active" style="margin: 6px 0; display: none;">
+                        <div style="display: flex; gap: 4px;">
+                            <button id="save-gaps-btn" style="flex: 1; background: #060; border-color: #0f0; color: #0f0;">Save Gaps</button>
+                            <button id="cancel-gaps-btn" style="flex: 1; background: #600; border-color: #f00; color: #f00;">Cancel</button>
+                        </div>
+                        <button id="add-gap-btn" style="width: 100%; margin-top: 4px; background: #606; border-color: #f0f;">+ Add Gap Marker</button>
+                        <p style="font-size: 9px; color: #f0f; margin: 4px 0 0 0; text-align: center;">Move/delete markers, then Save or Cancel</p>
+                    </div>
+                    <button id="heal-gaps-btn" style="width: 100%; margin-top: 6px; background: #606; border-color: #f0f;">Heal Gaps (Selection)</button>
+                    <button id="recut-gaps-btn" style="width: 100%; margin-top: 4px; background: #606; border-color: #f0f;">Recreate Gaps (Selection)</button>
+                    <button id="merge-paths-btn" style="width: 100%; margin-top: 4px; background: #606; border-color: #f0f;">Merge Paths at Endpoints</button>
+                    <p id="protection-status" class="status" style="font-size: 9px; margin-top: 4px;"></p>
+                </div>
+            </div>
+
+            <!-- ============================================ -->
+            <!-- PANEL 8: EXPORT TOOLS -->
+            <!-- ============================================ -->
+            <div class="accordion-section" id="section-export-tools">
+                <div class="accordion-header" data-section="section-export-tools">
+                    <svg class="drag-handle" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor"><circle cx="9" cy="6" r="1.5"/><circle cx="15" cy="6" r="1.5"/><circle cx="9" cy="12" r="1.5"/><circle cx="15" cy="12" r="1.5"/><circle cx="9" cy="18" r="1.5"/><circle cx="15" cy="18" r="1.5"/></svg>
+                    <span class="accordion-icon">â–¶</span>
+                    <span class="accordion-title">Export Tools</span>
+                </div>
+                <div class="accordion-content" style="display: none;">
+                    <div class="export-grid">
+                        <button id="export-floorplan-btn">Export Floorplan</button>
+                        <button id="export-ductwork-btn">Export Ductwork</button>
+                    </div>
+                    <button id="reexport-floorplan-btn" style="width: 100%; margin-top: 4px;">Re-Export Floorplan</button>
+                    <p id="export-status" class="status"></p>
+                </div>
+            </div>
+
+            <!-- ============================================ -->
+            <!-- PANEL 9: DEBUG TOOLS -->
+            <!-- ============================================ -->
+            <div class="accordion-section" id="section-debug-tools" style="border-color: #ff0;">
+                <div class="accordion-header" data-section="section-debug-tools" style="color: #ff0;">
+                    <svg class="drag-handle" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor"><circle cx="9" cy="6" r="1.5"/><circle cx="15" cy="6" r="1.5"/><circle cx="9" cy="12" r="1.5"/><circle cx="15" cy="12" r="1.5"/><circle cx="9" cy="18" r="1.5"/><circle cx="15" cy="18" r="1.5"/></svg>
+                    <span class="accordion-icon">â–¶</span>
+                    <span class="accordion-title">Debug Tools</span>
+                </div>
+                <div class="accordion-content" style="display: none; background: rgba(40, 40, 0, 0.3);">
+                    <div class="toggle-row" style="margin: 6px 0; display: flex; align-items: center; gap: 8px;">
+                        <input type="checkbox" id="dev-mode-option" style="width: 14px; height: 14px;">
+                        <label for="dev-mode-option" style="font-size: 10px; cursor: pointer; color: #0ff;">DEV MODE: Auto-reload JSX</label>
+                    </div>
+                    <div class="toggle-row" style="margin: 6px 0; display: flex; align-items: center; gap: 8px;">
+                        <input type="checkbox" id="debug-logging-option" style="width: 14px; height: 14px;">
+                        <label for="debug-logging-option" style="font-size: 10px; cursor: pointer; color: #ff0;">Enable Debug Logging</label>
+                    </div>
+                    <div class="toggle-row" style="margin: 6px 0; display: flex; align-items: center; gap: 8px;">
+                        <input type="checkbox" id="yield-to-ui-option" style="width: 14px; height: 14px;">
+                        <label for="yield-to-ui-option" style="font-size: 10px; cursor: pointer; color: #ff0;">Yield to UI during processing</label>
+                    </div>
+                    <div class="export-grid">
+                        <button id="test-note-btn">Test Note Property</button>
+                        <button id="view-log-btn">View Debug Log</button>
+                        <button id="clear-log-btn">Clear Log</button>
+                        <button id="reset-session-btn">Reset Session State</button>
+                        <button id="reload-jsx-btn">Reload JSX</button>
+                    </div>
+                </div>
+            </div>
+
+        </main>
+
+        <footer>
+            <button id="reload-btn" style="background:none; border:none; color:#555; font-size:7px;">Reload Extension (F5)</button>
+            <span id="debug-status" style="display:none;"></span>
+        </footer>
+
+        <!-- Debug Log Modal -->
+        <div id="debug-log-modal" style="display:none; position:fixed; top:0; left:0; width:100%; height:100%; background:rgba(0,0,0,0.9); z-index:9999; padding:10px; box-sizing:border-box;">
+            <div style="background:#0a1520; border:2px solid var(--primary-color); border-radius:8px; padding:10px; height:100%; display:flex; flex-direction:column;">
+                <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px;">
+                    <h3 style="margin:0; color:var(--primary-color); font-size:12px;">Debug Log</h3>
+                    <button id="close-log-btn" style="padding:4px 8px;">Close</button>
+                </div>
+                <textarea id="debug-log-content" readonly style="flex:1; background:#000; color:#0f0; font-family:monospace; font-size:9px; border:1px solid var(--secondary-color); padding:8px; resize:none;"></textarea>
+            </div>
+        </div>
+    </div>
+
+    <!-- Accordion persistence and drag-drop reordering script -->
+    <script>
+        // Accordion state and section order persistence using localStorage
+        (function() {
+            const ACCORDION_STATE_KEY = 'mdux_accordion_state';
+            const SECTION_ORDER_KEY = 'mdux_section_order';
+            const LOCK_STATE_KEY = 'mdux_sections_locked';
+
+            let isLocked = true; // Default: sections are locked
+            let draggedSection = null;
+
+            // Save accordion expanded/collapsed state
+            function saveAccordionState() {
+                const state = {};
+                document.querySelectorAll('.accordion-section').forEach(section => {
+                    state[section.id] = section.classList.contains('expanded');
+                });
+                localStorage.setItem(ACCORDION_STATE_KEY, JSON.stringify(state));
+            }
+
+            // Save section order
+            function saveSectionOrder() {
+                const order = [];
+                document.querySelectorAll('.accordion-section').forEach(section => {
+                    order.push(section.id);
+                });
+                localStorage.setItem(SECTION_ORDER_KEY, JSON.stringify(order));
+            }
+
+            // Save lock state
+            function saveLockState() {
+                localStorage.setItem(LOCK_STATE_KEY, JSON.stringify(isLocked));
+            }
+
+            // Restore accordion expanded/collapsed state
+            function restoreAccordionState() {
+                try {
+                    const saved = localStorage.getItem(ACCORDION_STATE_KEY);
+                    if (saved) {
+                        const state = JSON.parse(saved);
+                        document.querySelectorAll('.accordion-section').forEach(section => {
+                            if (state.hasOwnProperty(section.id)) {
+                                const isExpanded = state[section.id];
+                                const content = section.querySelector('.accordion-content');
+                                const icon = section.querySelector('.accordion-icon');
+
+                                if (isExpanded) {
+                                    section.classList.add('expanded');
+                                    if (content) content.style.display = 'block';
+                                    if (icon) icon.textContent = 'â–¼';
+                                } else {
+                                    section.classList.remove('expanded');
+                                    if (content) content.style.display = 'none';
+                                    if (icon) icon.textContent = 'â–¶';
+                                }
+                            }
+                        });
+                    }
+                } catch (e) {
+                    console.error('Error restoring accordion state:', e);
+                }
+            }
+
+            // Restore section order
+            function restoreSectionOrder() {
+                try {
+                    const saved = localStorage.getItem(SECTION_ORDER_KEY);
+                    if (saved) {
+                        const order = JSON.parse(saved);
+                        const mainFrame = document.querySelector('.main-frame');
+                        if (!mainFrame) return;
+
+                        // Reorder sections based on saved order
+                        order.forEach(sectionId => {
+                            const section = document.getElementById(sectionId);
+                            if (section) {
+                                mainFrame.appendChild(section);
+                            }
+                        });
+                    }
+                } catch (e) {
+                    console.error('Error restoring section order:', e);
+                }
+            }
+
+            // Restore lock state
+            function restoreLockState() {
+                try {
+                    const saved = localStorage.getItem(LOCK_STATE_KEY);
+                    if (saved !== null) {
+                        isLocked = JSON.parse(saved);
+                    }
+                    updateLockUI();
+                } catch (e) {
+                    console.error('Error restoring lock state:', e);
+                }
+            }
+
+            // Update lock button UI
+            function updateLockUI() {
+                const lockToggle = document.getElementById('section-lock-toggle');
+                const lockedIcon = document.getElementById('lock-icon-locked');
+                const unlockedIcon = document.getElementById('lock-icon-unlocked');
+
+                if (isLocked) {
+                    lockToggle.classList.remove('unlocked');
+                    lockToggle.title = 'Click to unlock section reordering';
+                    lockedIcon.style.display = 'block';
+                    unlockedIcon.style.display = 'none';
+                    // Remove draggable class from headers
+                    document.querySelectorAll('.accordion-header').forEach(header => {
+                        header.classList.remove('draggable');
+                        header.removeAttribute('draggable');
+                    });
+                } else {
+                    lockToggle.classList.add('unlocked');
+                    lockToggle.title = 'Click to lock section positions';
+                    lockedIcon.style.display = 'none';
+                    unlockedIcon.style.display = 'block';
+                    // Add draggable class to headers
+                    document.querySelectorAll('.accordion-header').forEach(header => {
+                        header.classList.add('draggable');
+                        header.setAttribute('draggable', 'true');
+                    });
+                }
+            }
+
+            // Toggle lock state
+            function toggleLock() {
+                isLocked = !isLocked;
+                saveLockState();
+                updateLockUI();
+            }
+
+            // Toggle accordion section
+            function toggleAccordion(header) {
+                const section = header.closest('.accordion-section');
+                const content = section.querySelector('.accordion-content');
+                const icon = section.querySelector('.accordion-icon');
+
+                const isExpanded = section.classList.toggle('expanded');
+
+                if (content) {
+                    content.style.display = isExpanded ? 'block' : 'none';
+                }
+                if (icon) {
+                    icon.textContent = isExpanded ? 'â–¼' : 'â–¶';
+                }
+
+                saveAccordionState();
+            }
+
+            // Drag and drop handlers
+            function handleDragStart(e) {
+                if (isLocked) return;
+                draggedSection = this.closest('.accordion-section');
+                draggedSection.classList.add('dragging');
+                e.dataTransfer.effectAllowed = 'move';
+                e.dataTransfer.setData('text/plain', draggedSection.id);
+            }
+
+            function handleDragEnd(e) {
+                if (draggedSection) {
+                    draggedSection.classList.remove('dragging');
+                }
+                draggedSection = null;
+                // Remove all drag-over classes
+                document.querySelectorAll('.accordion-section').forEach(section => {
+                    section.classList.remove('drag-over', 'drag-over-bottom');
+                });
+            }
+
+            function handleDragOver(e) {
+                if (isLocked || !draggedSection) return;
+                e.preventDefault();
+                e.dataTransfer.dropEffect = 'move';
+
+                const section = this.closest('.accordion-section');
+                if (section === draggedSection) return;
+
+                // Remove drag-over classes from all sections
+                document.querySelectorAll('.accordion-section').forEach(s => {
+                    s.classList.remove('drag-over', 'drag-over-bottom');
+                });
+
+                // Determine if we're in top or bottom half of the target
+                const rect = section.getBoundingClientRect();
+                const midpoint = rect.top + rect.height / 2;
+
+                if (e.clientY < midpoint) {
+                    section.classList.add('drag-over');
+                } else {
+                    section.classList.add('drag-over-bottom');
+                }
+            }
+
+            function handleDragLeave(e) {
+                const section = this.closest('.accordion-section');
+                // Only remove if we're leaving the section entirely
+                if (!section.contains(e.relatedTarget)) {
+                    section.classList.remove('drag-over', 'drag-over-bottom');
+                }
+            }
+
+            function handleDrop(e) {
+                if (isLocked || !draggedSection) return;
+                e.preventDefault();
+
+                const targetSection = this.closest('.accordion-section');
+                if (targetSection === draggedSection) return;
+
+                const mainFrame = document.querySelector('.main-frame');
+                const rect = targetSection.getBoundingClientRect();
+                const midpoint = rect.top + rect.height / 2;
+
+                // Insert before or after based on drop position
+                if (e.clientY < midpoint) {
+                    mainFrame.insertBefore(draggedSection, targetSection);
+                } else {
+                    const nextSibling = targetSection.nextElementSibling;
+                    if (nextSibling) {
+                        mainFrame.insertBefore(draggedSection, nextSibling);
+                    } else {
+                        mainFrame.appendChild(draggedSection);
+                    }
+                }
+
+                // Save new order
+                saveSectionOrder();
+
+                // Clean up
+                targetSection.classList.remove('drag-over', 'drag-over-bottom');
+            }
+
+            // Initialize on DOM ready
+            document.addEventListener('DOMContentLoaded', function() {
+                // Restore saved section order first (before accordion state)
+                restoreSectionOrder();
+
+                // Restore saved accordion state
+                restoreAccordionState();
+
+                // Restore lock state
+                restoreLockState();
+
+                // Add lock toggle handler
+                const lockToggle = document.getElementById('section-lock-toggle');
+                if (lockToggle) {
+                    lockToggle.addEventListener('click', function(e) {
+                        e.stopPropagation();
+                        toggleLock();
+                    });
+                }
+
+                // Add click and drag handlers to accordion headers
+                document.querySelectorAll('.accordion-header').forEach(header => {
+                    // Click to expand/collapse
+                    header.addEventListener('click', function(e) {
+                        // Don't toggle if we just finished dragging
+                        if (!e.defaultPrevented) {
+                            toggleAccordion(this);
+                        }
+                    });
+
+                    // Drag handlers
+                    header.addEventListener('dragstart', handleDragStart);
+                    header.addEventListener('dragend', handleDragEnd);
+                    header.addEventListener('dragover', handleDragOver);
+                    header.addEventListener('dragleave', handleDragLeave);
+                    header.addEventListener('drop', handleDrop);
+                });
+
+                // Also add dragover/drop to sections for better hit detection
+                document.querySelectorAll('.accordion-section').forEach(section => {
+                    section.addEventListener('dragover', function(e) {
+                        if (isLocked || !draggedSection) return;
+                        e.preventDefault();
+                        const header = this.querySelector('.accordion-header');
+                        if (header) {
+                            handleDragOver.call(header, e);
+                        }
+                    });
+                    section.addEventListener('dragleave', function(e) {
+                        if (!this.contains(e.relatedTarget)) {
+                            this.classList.remove('drag-over', 'drag-over-bottom');
+                        }
+                    });
+                    section.addEventListener('drop', function(e) {
+                        if (isLocked || !draggedSection) return;
+                        const header = this.querySelector('.accordion-header');
+                        if (header) {
+                            handleDrop.call(header, e);
+                        }
+                    });
+                });
+            });
+        })();
+    </script>
+</body>
+
+</html>
+
