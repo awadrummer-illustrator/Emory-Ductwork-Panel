@@ -304,6 +304,7 @@
     let emoryWidthDragActive = false;
     let emoryWidthApplyInFlight = false;
     let emoryWidthLastApplied = null;
+    let emoryWidthRefreshPending = false;
 
     function onAfterSelectionChanged() {
         if (isCepSuspended()) return;
@@ -664,20 +665,58 @@
         emoryWidthStatus.classList.toggle('error', !!isError);
     }
 
+    function getEmoryWidthSliderConfig(width) {
+        const normalized = Math.max(0.25, Number(width) || 0.25);
+        const lowerSpan = Math.max(6, normalized * 0.75);
+        const upperSpan = Math.max(8, normalized * 1.25);
+        let step = 0.1;
+        if (normalized >= 40) {
+            step = 0.25;
+        }
+        if (normalized >= 120) {
+            step = 0.5;
+        }
+        return {
+            min: Math.max(0.25, normalized - lowerSpan),
+            max: normalized + upperSpan,
+            step: step
+        };
+    }
+
     function syncEmoryWidthControls(width, preserveInputValue) {
         if (!emoryWidthSlider || !emoryWidthInput || !isFinite(width) || width <= 0) return;
         const normalized = Math.max(0.25, width);
-        const dynamicMax = Math.max(120, Math.ceil(normalized * 4));
-        emoryWidthSlider.min = '0.25';
-        emoryWidthSlider.max = String(dynamicMax);
-        emoryWidthSlider.step = '0.25';
+        const sliderConfig = getEmoryWidthSliderConfig(normalized);
+        const inputMax = Math.max(240, Math.ceil(sliderConfig.max * 2));
+        emoryWidthSlider.min = String(sliderConfig.min);
+        emoryWidthSlider.max = String(sliderConfig.max);
+        emoryWidthSlider.step = String(sliderConfig.step);
         emoryWidthInput.min = '0.25';
-        emoryWidthInput.step = '0.25';
-        emoryWidthInput.max = String(dynamicMax * 2);
+        emoryWidthInput.step = String(sliderConfig.step);
+        emoryWidthInput.max = String(inputMax);
         emoryWidthSlider.value = String(normalized);
         if (!preserveInputValue) {
             emoryWidthInput.value = normalized.toFixed(2).replace(/\.00$/, '');
         }
+    }
+
+    function flushPendingEmoryWidthRefresh() {
+        if (!emoryWidthRefreshPending) return;
+        emoryWidthRefreshPending = false;
+        refreshEmorySelectionState(true).catch(function () {});
+    }
+
+    function finishEmoryWidthDrag(commitFinalWidth) {
+        if (!emoryWidthDragActive) return;
+        emoryWidthDragActive = false;
+
+        const numericWidth = emoryWidthSlider ? Number(emoryWidthSlider.value) : NaN;
+        if (commitFinalWidth && isFinite(numericWidth) && numericWidth > 0) {
+            queueEmoryWidthApply(numericWidth, true);
+            return;
+        }
+
+        flushPendingEmoryWidthRefresh();
     }
 
     function setEmoryControlsEnabled(enabled) {
@@ -815,11 +854,19 @@
             emoryWidthLastApplied = payloadWidth;
             setEmoryWidthStatus(result.message || 'Width updated.', false);
             scheduleSkipOrthoRefresh();
-            await refreshEmorySelectionState(true);
+            if (emoryWidthDragActive && !opts.forceRefresh) {
+                emoryWidthRefreshPending = true;
+            } else {
+                emoryWidthRefreshPending = false;
+                await refreshEmorySelectionState(true);
+            }
         } catch (e) {
             setEmoryWidthStatus('Failed to apply width: ' + e.message, true);
         } finally {
             emoryWidthApplyInFlight = false;
+            if (!emoryWidthDragActive) {
+                flushPendingEmoryWidthRefresh();
+            }
         }
     }
 
@@ -2184,25 +2231,37 @@
         if (setEmoryStartBtn) setEmoryStartBtn.addEventListener('click', handleSetEmoryStartClick);
         if (processEmoryBtn) processEmoryBtn.addEventListener('click', handleProcessEmoryClick);
         if (emoryWidthSlider && emoryWidthInput) {
-            emoryWidthSlider.addEventListener('mousedown', function () {
+            const beginEmoryWidthDrag = function () {
                 emoryWidthDragActive = true;
+                emoryWidthRefreshPending = false;
+            };
+            emoryWidthSlider.addEventListener('mousedown', function () {
+                beginEmoryWidthDrag();
             });
             emoryWidthSlider.addEventListener('touchstart', function () {
-                emoryWidthDragActive = true;
+                beginEmoryWidthDrag();
+            }, { passive: true });
+            window.addEventListener('mouseup', function () {
+                finishEmoryWidthDrag(false);
+            });
+            window.addEventListener('touchend', function () {
+                finishEmoryWidthDrag(false);
+            }, { passive: true });
+            window.addEventListener('touchcancel', function () {
+                finishEmoryWidthDrag(false);
             }, { passive: true });
             emoryWidthSlider.addEventListener('input', function () {
                 const numericWidth = Number(emoryWidthSlider.value);
                 if (!isFinite(numericWidth) || numericWidth <= 0) return;
-                emoryWidthDragActive = true;
+                beginEmoryWidthDrag();
                 emoryWidthInput.value = emoryWidthSlider.value;
                 queueEmoryWidthApply(numericWidth, false);
             });
             emoryWidthSlider.addEventListener('change', function () {
                 const numericWidth = Number(emoryWidthSlider.value);
-                emoryWidthDragActive = false;
                 if (!isFinite(numericWidth) || numericWidth <= 0) return;
                 emoryWidthInput.value = emoryWidthSlider.value;
-                queueEmoryWidthApply(numericWidth, true);
+                finishEmoryWidthDrag(true);
             });
         }
         if (emoryWidthInput && emoryWidthSlider) {

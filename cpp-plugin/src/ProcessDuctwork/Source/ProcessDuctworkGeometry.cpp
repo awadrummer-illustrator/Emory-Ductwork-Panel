@@ -1644,6 +1644,10 @@ namespace
 			return;
 		}
 
+		const bool startIsFirstSegment = (state.startSegmentIndex <= 0);
+		const bool startIsLastSegment = (state.startSegmentIndex >= (state.segmentCount - 1));
+		const bool startIsEndpoint = startIsFirstSegment || startIsLastSegment;
+
 		for (size_t i = 0; i < selectedSegmentIndices.size(); ++i) {
 			const int segmentIndex = selectedSegmentIndices[i];
 			if (segmentIndex >= 0 && segmentIndex < state.segmentCount) {
@@ -1652,11 +1656,36 @@ namespace
 		}
 
 		auto applySelectionDirection = [&](int direction) {
+			bool hasNonStartAnchorOnDirection = false;
+			for (size_t i = 0; i < selectedSegmentIndices.size(); ++i) {
+				const int segmentIndex = selectedSegmentIndices[i];
+				if (segmentIndex == state.startSegmentIndex) {
+					continue;
+				}
+				if (direction < 0 && segmentIndex < state.startSegmentIndex) {
+					hasNonStartAnchorOnDirection = true;
+					break;
+				}
+				if (direction > 0 && segmentIndex > state.startSegmentIndex) {
+					hasNonStartAnchorOnDirection = true;
+					break;
+				}
+			}
+
 			std::vector<int> anchors;
 			for (size_t i = 0; i < selectedSegmentIndices.size(); ++i) {
 				const int segmentIndex = selectedSegmentIndices[i];
 				if (segmentIndex == state.startSegmentIndex) {
-					anchors.push_back(segmentIndex);
+					if (hasNonStartAnchorOnDirection) {
+						continue;
+					}
+					if (!startIsEndpoint) {
+						anchors.push_back(segmentIndex);
+					} else if (startIsFirstSegment && direction > 0) {
+						anchors.push_back(segmentIndex);
+					} else if (startIsLastSegment && direction < 0) {
+						anchors.push_back(segmentIndex);
+					}
 				} else if (direction < 0 && segmentIndex < state.startSegmentIndex) {
 					anchors.push_back(segmentIndex);
 				} else if (direction > 0 && segmentIndex > state.startSegmentIndex) {
@@ -1697,8 +1726,12 @@ namespace
 			}
 		};
 
-		applySelectionDirection(-1);
-		applySelectionDirection(1);
+		if (startIsEndpoint) {
+			applySelectionDirection(startIsFirstSegment ? 1 : -1);
+		} else {
+			applySelectionDirection(-1);
+			applySelectionDirection(1);
+		}
 		state.touched = true;
 		state.selectedSeed = true;
 	}
