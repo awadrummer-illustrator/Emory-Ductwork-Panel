@@ -39,9 +39,13 @@ namespace DuctworkGeometry
 	bool IsCenterlineCandidate(AIArtHandle art, const std::vector<DuctworkPoint>& points, bool closed, const std::string& layerName);
 	bool GetEffectiveStrokeWidth(AIArtHandle art, double& outWidth);
 	bool EnsureEmorySourceId(AIArtHandle art, std::string& outId);
+	bool PrepareSelectedEmorySourceIdsForProcessing(const std::vector<DuctworkPath>& paths, std::vector<std::string>& outCleanupIds);
 	size_t DeleteGeneratedEmoryBodies(const std::vector<std::string>& sourceIds);
 	EmoryBodyStats GenerateEmoryBodies(const std::vector<DuctworkPath>& paths);
 	bool ToggleSelectedEmoryConnectorStyles(std::string& outMessage);
+	bool GetSelectedEmorySegmentState(std::string& outJson);
+	bool SetSelectedEmoryStartSegment(std::string& outMessage);
+	bool ApplySelectedEmorySegmentWidth(double newWidth, std::string& outMessage);
 }
 
 #endif // __ProcessDuctworkGeometry_H__

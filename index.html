@@ -79,6 +79,16 @@
                     <button id="process-btn" class="btn-primary-glow" style="display:none;">Process Ductwork Legacy</button>
                     <button id="process-placed-btn" class="btn-primary-glow">Process Emory Ductwork</button>
                     <button id="toggle-connector-style-btn" style="width: 100%; margin-top: 4px;">Toggle Selected Connector Style</button>
+                    <button id="set-emory-start-btn" style="width: 100%; margin-top: 4px;">Mark Selected Segment As Start</button>
+                    <div class="control-group" style="margin-top: 6px;">
+                        <div class="slider-row" style="margin-bottom: 4px;">
+                            <span class="slider-label" style="width: 62px;">Width</span>
+                            <input type="range" id="emory-width-slider" min="1" max="120" step="0.25" value="8">
+                            <input type="number" id="emory-width-input" min="0.25" step="0.25" value="8" style="width: 54px;">
+                        </div>
+                        <p id="emory-selection-status" class="status"></p>
+                        <p id="emory-width-status" class="status"></p>
+                    </div>
                     <p id="emory-scaffold-note" class="status">Native Emory processing builds separate duct segments and connector pieces from selected centerlines and can be rerun after edits.</p>
 
                     <!-- Process ortho options -->

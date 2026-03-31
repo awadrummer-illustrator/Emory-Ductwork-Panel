@@ -1027,6 +1027,34 @@ ASErr ProcessDuctworkPlugin::Message(char* caller, char* selector, void* message
 					return kNoErr;
 				}
 
+				if (action == "get-emory-selection-state") {
+					std::string stateJson;
+					DuctworkGeometry::GetSelectedEmorySegmentState(stateJson);
+					msg->outParam = ai::UnicodeString::FromUTF8(stateJson);
+					return kNoErr;
+				}
+
+				if (action == "set-emory-start-segment") {
+					std::string messageText;
+					const bool ok = DuctworkGeometry::SetSelectedEmoryStartSegment(messageText);
+					std::ostringstream out;
+					out << "{\"ok\":" << (ok ? "true" : "false")
+						<< ",\"message\":\"" << messageText << "\"}";
+					msg->outParam = ai::UnicodeString::FromUTF8(out.str());
+					return kNoErr;
+				}
+
+				if (action == "apply-emory-segment-width") {
+					const double width = ParseDouble(data, "width", 0.0);
+					std::string messageText;
+					const bool ok = DuctworkGeometry::ApplySelectedEmorySegmentWidth(width, messageText);
+					std::ostringstream out;
+					out << "{\"ok\":" << (ok ? "true" : "false")
+						<< ",\"message\":\"" << messageText << "\"}";
+					msg->outParam = ai::UnicodeString::FromUTF8(out.str());
+					return kNoErr;
+				}
+
 				if (action == "get-selected-anchors") {
 					// Use C++ SDK GetPathSegmentSelected to detect which specific
 					// anchor points are selected via the Direct Selection tool.
@@ -1917,14 +1945,16 @@ ASErr ProcessDuctworkPlugin::ProcessDuctwork(const ProcessDuctworkOptions& optio
 	{
 		StepTimer emoryCleanupTimer("EmoryCleanup");
 		std::vector<std::string> sourceIds;
-		sourceIds.reserve(ductworkPaths.size());
-		for (size_t i = 0; i < ductworkPaths.size(); ++i) {
-			if (!DuctworkLayers::IsColorLayerName(ductworkPaths[i].layerName)) {
-				continue;
-			}
-			std::string sourceId;
-			if (DuctworkGeometry::EnsureEmorySourceId(ductworkPaths[i].art, sourceId) && !sourceId.empty()) {
-				sourceIds.push_back(sourceId);
+		if (!DuctworkGeometry::PrepareSelectedEmorySourceIdsForProcessing(ductworkPaths, sourceIds)) {
+			sourceIds.reserve(ductworkPaths.size());
+			for (size_t i = 0; i < ductworkPaths.size(); ++i) {
+				if (!DuctworkLayers::IsColorLayerName(ductworkPaths[i].layerName)) {
+					continue;
+				}
+				std::string sourceId;
+				if (DuctworkGeometry::EnsureEmorySourceId(ductworkPaths[i].art, sourceId) && !sourceId.empty()) {
+					sourceIds.push_back(sourceId);
+				}
 			}
 		}
 		deletedEmoryBodies = DuctworkGeometry::DeleteGeneratedEmoryBodies(sourceIds);
@@ -2103,7 +2133,7 @@ ASErr ProcessDuctworkPlugin::ProcessDuctwork(const ProcessDuctworkOptions& optio
 		DuctworkLog::Write(skipEmoryLineGraphics ? "Compounds skipped for Emory body workflow" : "Compounds skipped");
 	}
 
-	if (!options.skipStyles && !skipEmoryLineGraphics) {
+	if (!options.skipStyles) {
 		StepTimer styleTimer("Styles");
 		DuctworkStyleStats styleStats = DuctworkStyles::ApplyLineStyles(document, ductworkPaths);
 		{

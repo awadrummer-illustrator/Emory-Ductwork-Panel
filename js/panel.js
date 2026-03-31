@@ -69,6 +69,11 @@
     let processBtn = document.getElementById('process-btn');
     let processPlacedBtn = document.getElementById('process-placed-btn');
     let toggleConnectorStyleBtn = document.getElementById('toggle-connector-style-btn');
+    let setEmoryStartBtn = document.getElementById('set-emory-start-btn');
+    let emoryWidthSlider = document.getElementById('emory-width-slider');
+    let emoryWidthInput = document.getElementById('emory-width-input');
+    let emorySelectionStatus = document.getElementById('emory-selection-status');
+    let emoryWidthStatus = document.getElementById('emory-width-status');
     let processEmoryBtn = document.getElementById('process-emory-btn');
     let processStatus = document.getElementById('process-status');
     let revertBtn = document.getElementById('revert-ortho-btn');
@@ -93,6 +98,11 @@
         processBtn = document.getElementById('process-btn');
         processPlacedBtn = document.getElementById('process-placed-btn');
         toggleConnectorStyleBtn = document.getElementById('toggle-connector-style-btn');
+        setEmoryStartBtn = document.getElementById('set-emory-start-btn');
+        emoryWidthSlider = document.getElementById('emory-width-slider');
+        emoryWidthInput = document.getElementById('emory-width-input');
+        emorySelectionStatus = document.getElementById('emory-selection-status');
+        emoryWidthStatus = document.getElementById('emory-width-status');
         processEmoryBtn = document.getElementById('process-emory-btn');
         processStatus = document.getElementById('process-status');
         revertBtn = document.getElementById('revert-ortho-btn');
@@ -288,6 +298,12 @@
     let pollInProgress = false;
     let lastSelectionHash = '';
     let skipSelectionRefresh = false;
+    let emorySelectionState = null;
+    let emoryWidthRefreshInFlight = false;
+    let emoryWidthApplyTimer = null;
+    let emoryWidthDragActive = false;
+    let emoryWidthApplyInFlight = false;
+    let emoryWidthLastApplied = null;
 
     function onAfterSelectionChanged() {
         if (isCepSuspended()) return;
@@ -611,6 +627,217 @@
         return { ok: true, value: value };
     }
 
+    function parseBridgeJsonResult(value) {
+        const normalized = normaliseResult(value);
+        if (!normalized.ok) {
+            return { ok: false, message: normalized.value || 'Bridge error.' };
+        }
+        if (typeof normalized.value === 'object' && normalized.value) {
+            if (typeof normalized.value.ok !== 'boolean') {
+                normalized.value.ok = true;
+            }
+            return normalized.value;
+        }
+        if (typeof normalized.value === 'string' && normalized.value) {
+            try {
+                const parsed = JSON.parse(normalized.value);
+                if (parsed && typeof parsed.ok !== 'boolean') {
+                    parsed.ok = true;
+                }
+                return parsed || { ok: true, message: normalized.value };
+            } catch (e) {
+                return { ok: true, message: normalized.value, value: normalized.value };
+            }
+        }
+        return { ok: true, message: '' };
+    }
+
+    function setEmorySelectionStatus(message, isError) {
+        if (!emorySelectionStatus) return;
+        emorySelectionStatus.textContent = message || '';
+        emorySelectionStatus.classList.toggle('error', !!isError);
+    }
+
+    function setEmoryWidthStatus(message, isError) {
+        if (!emoryWidthStatus) return;
+        emoryWidthStatus.textContent = message || '';
+        emoryWidthStatus.classList.toggle('error', !!isError);
+    }
+
+    function syncEmoryWidthControls(width, preserveInputValue) {
+        if (!emoryWidthSlider || !emoryWidthInput || !isFinite(width) || width <= 0) return;
+        const normalized = Math.max(0.25, width);
+        const dynamicMax = Math.max(120, Math.ceil(normalized * 4));
+        emoryWidthSlider.min = '0.25';
+        emoryWidthSlider.max = String(dynamicMax);
+        emoryWidthSlider.step = '0.25';
+        emoryWidthInput.min = '0.25';
+        emoryWidthInput.step = '0.25';
+        emoryWidthInput.max = String(dynamicMax * 2);
+        emoryWidthSlider.value = String(normalized);
+        if (!preserveInputValue) {
+            emoryWidthInput.value = normalized.toFixed(2).replace(/\.00$/, '');
+        }
+    }
+
+    function setEmoryControlsEnabled(enabled) {
+        if (setEmoryStartBtn) setEmoryStartBtn.disabled = !enabled;
+        if (emoryWidthSlider) emoryWidthSlider.disabled = !enabled;
+        if (emoryWidthInput) emoryWidthInput.disabled = !enabled;
+    }
+
+    async function refreshEmorySelectionState(force) {
+        if (!setEmoryStartBtn || !emoryWidthSlider || !emoryWidthInput) return;
+        if (isCepSuspended()) return;
+        if (emoryWidthRefreshInFlight) return;
+        if (!force) {
+            if (emoryWidthApplyInFlight || emoryWidthDragActive) return;
+            if (document.activeElement === emoryWidthInput) return;
+        }
+
+        emoryWidthRefreshInFlight = true;
+        try {
+            await ensureBridgeLoaded();
+            const state = parseBridgeJsonResult(await evalScript('MDUX_cppGetSelectedEmorySegmentState()'));
+            emorySelectionState = state;
+
+            if (!state || state.ok === false) {
+                setEmoryControlsEnabled(false);
+                setEmorySelectionStatus('');
+                setEmoryWidthStatus((state && state.message) ? state.message : 'Unable to read Emory selection.', true);
+                return;
+            }
+
+            if (!state.available) {
+                setEmoryControlsEnabled(false);
+                if (state.reason === 'multiple-runs') {
+                    setEmorySelectionStatus('Select segments from only one Emory run at a time.', true);
+                } else if (state.reason === 'no-segment-selection') {
+                    setEmorySelectionStatus('Select a generated Emory duct segment to edit width.', false);
+                } else {
+                    setEmorySelectionStatus('');
+                }
+                setEmoryWidthStatus('');
+                return;
+            }
+
+            const selectedCount = Number(state.selectedCount || 0);
+            const runCount = Number(state.runCount || 0);
+            const segmentCount = Number(state.segmentCount || 0);
+            const startSegmentIndex = Number(state.startSegmentIndex || 0);
+            const selectedSegmentIndex = Number(state.selectedSegmentIndex);
+            const startLabel = 'Start: segment ' + (startSegmentIndex + 1) + ' of ' + segmentCount;
+
+            if (runCount > 1) {
+                let multiRunMessage = selectedCount + ' segments selected across ' + runCount + ' runs';
+                if (state.mixedWidths) {
+                    multiRunMessage += ' | Mixed widths selected';
+                }
+                setEmorySelectionStatus(multiRunMessage, false);
+            } else if (selectedCount === 1 && isFinite(selectedSegmentIndex) && selectedSegmentIndex >= 0) {
+                const selectedLabel = 'Selected: segment ' + (selectedSegmentIndex + 1) + ' of ' + segmentCount;
+                setEmorySelectionStatus(selectedLabel + ' | ' + startLabel, false);
+            } else {
+                let msg = selectedCount + ' segments selected | ' + startLabel;
+                if (state.mixedWidths) {
+                    msg += ' | Mixed widths selected';
+                }
+                setEmorySelectionStatus(msg, false);
+            }
+
+            const canApplyWidth = !!state.canApplyWidth;
+            if (setEmoryStartBtn) {
+                setEmoryStartBtn.disabled = selectedCount !== 1;
+            }
+            if (emoryWidthSlider) emoryWidthSlider.disabled = !canApplyWidth;
+            if (emoryWidthInput) emoryWidthInput.disabled = !canApplyWidth;
+
+            if (canApplyWidth && runCount > 1) {
+                const referenceWidth = Number(state.sharedWidth || state.referenceWidth || 0);
+                if (referenceWidth > 0) {
+                    syncEmoryWidthControls(referenceWidth, false);
+                }
+                setEmoryWidthStatus(state.mixedWidths
+                    ? 'Mixed widths selected across multiple runs. Dragging the slider will set all selected segments to one width and cascade each run away from its marked start.'
+                    : 'Dragging the slider will set all selected segments to one width and cascade each run away from its marked start.', false);
+            } else if (canApplyWidth && selectedCount === 1) {
+                const selectedWidth = Number(state.selectedWidth || 0);
+                if (selectedWidth > 0) {
+                    syncEmoryWidthControls(selectedWidth, false);
+                    emoryWidthLastApplied = selectedWidth;
+                }
+                setEmoryWidthStatus(state.isStartSegment
+                    ? 'Width changes will cascade away from this start segment in both directions.'
+                    : 'Width changes will cascade away from the marked start on this branch.', false);
+            } else if (canApplyWidth && selectedCount > 1) {
+                const referenceWidth = Number(state.sharedWidth || state.referenceWidth || 0);
+                if (referenceWidth > 0) {
+                    syncEmoryWidthControls(referenceWidth, false);
+                }
+                setEmoryWidthStatus(state.mixedWidths
+                    ? 'Mixed widths selected. Dragging the slider will set all selected segments to one width and cascade each selected branch outward.'
+                    : 'Dragging the slider will set all selected segments to one width and cascade each selected branch outward.', false);
+            } else {
+                setEmoryWidthStatus('', false);
+            }
+        } catch (e) {
+            setEmoryControlsEnabled(false);
+            setEmorySelectionStatus('');
+            setEmoryWidthStatus('Unable to refresh Emory selection state: ' + e.message, true);
+        } finally {
+            emoryWidthRefreshInFlight = false;
+        }
+    }
+
+    async function applySelectedEmorySegmentWidth(width, options) {
+        const opts = options || {};
+        const numericWidth = Number(width);
+        if (!isFinite(numericWidth) || numericWidth <= 0) {
+            setEmoryWidthStatus('Width must be greater than zero.', true);
+            return;
+        }
+        if (emoryWidthApplyInFlight) {
+            return;
+        }
+
+        emoryWidthApplyInFlight = true;
+        try {
+            await ensureBridgeLoaded();
+            if (!opts.silent) {
+                setEmoryWidthStatus('Applying width...', false);
+            }
+            const payloadWidth = Math.max(0.25, numericWidth);
+            const result = parseBridgeJsonResult(await evalScript('MDUX_cppApplySelectedEmorySegmentWidth(' + payloadWidth + ')'));
+            if (!result || result.ok === false) {
+                setEmoryWidthStatus((result && result.message) ? result.message : 'Failed to apply width.', true);
+                return;
+            }
+            emoryWidthLastApplied = payloadWidth;
+            setEmoryWidthStatus(result.message || 'Width updated.', false);
+            scheduleSkipOrthoRefresh();
+            await refreshEmorySelectionState(true);
+        } catch (e) {
+            setEmoryWidthStatus('Failed to apply width: ' + e.message, true);
+        } finally {
+            emoryWidthApplyInFlight = false;
+        }
+    }
+
+    function queueEmoryWidthApply(width, immediate) {
+        if (emoryWidthApplyTimer) {
+            clearTimeout(emoryWidthApplyTimer);
+            emoryWidthApplyTimer = null;
+        }
+        const fn = function () {
+            applySelectedEmorySegmentWidth(width, { silent: false }).catch(function () {});
+        };
+        if (immediate) {
+            fn();
+            return;
+        }
+        emoryWidthApplyTimer = setTimeout(fn, 90);
+    }
+
     function escapeForExtendScript(str) {
         return str.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
     }
@@ -720,16 +947,19 @@
             if (skipSelectionRefresh) return;
             if (AUTO_SELECTION_REFRESH_MODE === 'skip-ortho') {
                 refreshSkipOrthoState().catch(() => { });
+                refreshEmorySelectionState(false).catch(() => { });
                 return;
             }
             if (AUTO_SELECTION_REFRESH_MODE === 'skip-ortho+rotation') {
                 refreshSkipOrthoState().catch(() => { });
                 refreshRotationOverrideState().catch(() => { });
+                refreshEmorySelectionState(false).catch(() => { });
                 return;
             }
             refreshSkipOrthoState().catch(() => { });
             refreshRotationOverrideState().catch(() => { });
             refreshSelectionTransformState().catch(() => { });
+            refreshEmorySelectionState(false).catch(() => { });
         }, 150);
     }
 
@@ -1080,16 +1310,37 @@
         setProcessStatus('Toggling selected connector style...');
         try {
             await ensureBridgeLoaded();
-            const result = normaliseResult(await evalScript('MDUX_cppToggleSelectedEmoryConnector()'));
-            if (result.ok) {
-                setProcessStatus(result.value || 'Connector style updated.');
+            const result = parseBridgeJsonResult(await evalScript('MDUX_cppToggleSelectedEmoryConnector()'));
+            if (result && result.ok !== false) {
+                setProcessStatus(result.message || 'Connector style updated.');
             } else {
-                setProcessStatus('Error: ' + result.value, true);
+                setProcessStatus('Error: ' + (result && result.message ? result.message : 'Unable to update connector style.'), true);
             }
         } catch (e) {
             setProcessStatus('Error: ' + e.message, true);
         } finally {
             toggleConnectorStyleBtn.disabled = false;
+            scheduleSkipOrthoRefresh();
+        }
+    }
+
+    async function handleSetEmoryStartClick() {
+        if (!setEmoryStartBtn) return;
+        setEmoryStartBtn.disabled = true;
+        setEmoryWidthStatus('Marking selected segment as the cascade start...', false);
+        try {
+            await ensureBridgeLoaded();
+            const result = parseBridgeJsonResult(await evalScript('MDUX_cppSetSelectedEmoryStartSegment()'));
+            if (result && result.ok !== false) {
+                setEmoryWidthStatus(result.message || 'Cascade start updated.', false);
+            } else {
+                setEmoryWidthStatus((result && result.message) ? result.message : 'Unable to mark the cascade start.', true);
+            }
+        } catch (e) {
+            setEmoryWidthStatus('Unable to mark the cascade start: ' + e.message, true);
+        } finally {
+            scheduleSkipOrthoRefresh();
+            setEmoryStartBtn.disabled = false;
         }
     }
 
@@ -1930,7 +2181,59 @@
         if (processBtn) processBtn.addEventListener('click', handleProcessClick);
         if (processPlacedBtn) processPlacedBtn.addEventListener('click', handleProcessPlacedApiClick);
         if (toggleConnectorStyleBtn) toggleConnectorStyleBtn.addEventListener('click', handleToggleConnectorStyleClick);
+        if (setEmoryStartBtn) setEmoryStartBtn.addEventListener('click', handleSetEmoryStartClick);
         if (processEmoryBtn) processEmoryBtn.addEventListener('click', handleProcessEmoryClick);
+        if (emoryWidthSlider && emoryWidthInput) {
+            emoryWidthSlider.addEventListener('mousedown', function () {
+                emoryWidthDragActive = true;
+            });
+            emoryWidthSlider.addEventListener('touchstart', function () {
+                emoryWidthDragActive = true;
+            }, { passive: true });
+            emoryWidthSlider.addEventListener('input', function () {
+                const numericWidth = Number(emoryWidthSlider.value);
+                if (!isFinite(numericWidth) || numericWidth <= 0) return;
+                emoryWidthDragActive = true;
+                emoryWidthInput.value = emoryWidthSlider.value;
+                queueEmoryWidthApply(numericWidth, false);
+            });
+            emoryWidthSlider.addEventListener('change', function () {
+                const numericWidth = Number(emoryWidthSlider.value);
+                emoryWidthDragActive = false;
+                if (!isFinite(numericWidth) || numericWidth <= 0) return;
+                emoryWidthInput.value = emoryWidthSlider.value;
+                queueEmoryWidthApply(numericWidth, true);
+            });
+        }
+        if (emoryWidthInput && emoryWidthSlider) {
+            emoryWidthInput.addEventListener('input', function () {
+                const numericWidth = Number(emoryWidthInput.value);
+                if (!isFinite(numericWidth) || numericWidth <= 0) return;
+                syncEmoryWidthControls(numericWidth, true);
+            });
+            emoryWidthInput.addEventListener('change', function () {
+                const numericWidth = Number(emoryWidthInput.value);
+                if (!isFinite(numericWidth) || numericWidth <= 0) {
+                    setEmoryWidthStatus('Width must be greater than zero.', true);
+                    return;
+                }
+                emoryWidthDragActive = false;
+                syncEmoryWidthControls(numericWidth, true);
+                queueEmoryWidthApply(numericWidth, true);
+            });
+            emoryWidthInput.addEventListener('keydown', function (e) {
+                if (e.key !== 'Enter') return;
+                e.preventDefault();
+                const numericWidth = Number(emoryWidthInput.value);
+                if (!isFinite(numericWidth) || numericWidth <= 0) {
+                    setEmoryWidthStatus('Width must be greater than zero.', true);
+                    return;
+                }
+                emoryWidthDragActive = false;
+                syncEmoryWidthControls(numericWidth, true);
+                queueEmoryWidthApply(numericWidth, true);
+            });
+        }
         if (revertBtn) revertBtn.addEventListener('click', handleRevertPreOrtho);
         if (clearRotationMetadataBtn) clearRotationMetadataBtn.addEventListener('click', handleClearRotationMetadata);
         if (getAngleBtn) getAngleBtn.addEventListener('click', handleGetAngle);
@@ -2912,6 +3215,7 @@
             refreshDebugLoggingState().catch(function () { });
             refreshYieldToUiState().catch(function () { });
             refreshDocScale().catch(function () { });
+            refreshEmorySelectionState(true).catch(function () { });
 
             // Also refresh when panel gets focus (removed blocking debug log)
             window.addEventListener('focus', function() {
@@ -2921,6 +3225,7 @@
                     if (skipSelectionRefresh) return;
                     refreshSelectionTransformState().catch(function() {});
                     refreshRotationOverrideState().catch(function() {});
+                    refreshEmorySelectionState(true).catch(function() {});
                 }).catch(function() {});
             });
 
