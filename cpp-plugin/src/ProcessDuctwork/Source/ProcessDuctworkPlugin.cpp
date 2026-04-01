@@ -993,6 +993,9 @@ ASErr ProcessDuctworkPlugin::Message(char* caller, char* selector, void* message
 					if (data.find("skipFinalRegisterSegment") != data.end()) {
 						defaults.skipFinalRegisterSegment = ParseBool(data, "skipFinalRegisterSegment", defaults.skipFinalRegisterSegment);
 					}
+					if (data.find("skipFinalSegmentThickness") != data.end()) {
+						defaults.skipFinalSegmentThickness = ParseBool(data, "skipFinalSegmentThickness", defaults.skipFinalSegmentThickness);
+					}
 					if (data.find("skipRegisterRotation") != data.end()) {
 						defaults.skipRegisterRotation = ParseBool(data, "skipRegisterRotation", defaults.skipRegisterRotation);
 					}
@@ -1034,9 +1037,60 @@ ASErr ProcessDuctworkPlugin::Message(char* caller, char* selector, void* message
 					return kNoErr;
 				}
 
+				if (action == "revert-emory-to-centerlines") {
+					std::string messageText;
+					const bool ok = DuctworkGeometry::RevertSelectedEmoryToCenterlines(messageText);
+					std::ostringstream out;
+					out << "{\"ok\":" << (ok ? "true" : "false")
+						<< ",\"message\":\"" << messageText << "\"}";
+					msg->outParam = ai::UnicodeString::FromUTF8(out.str());
+					return kNoErr;
+				}
+
+				if (action == "set-emory-taper-alignment") {
+					const std::string alignment = data.find("value") != data.end() ? data.find("value")->second : std::string();
+					std::string messageText;
+					const bool ok = DuctworkGeometry::SetSelectedEmoryTaperAlignment(alignment, messageText);
+					std::ostringstream out;
+					out << "{\"ok\":" << (ok ? "true" : "false")
+						<< ",\"message\":\"" << messageText << "\"}";
+					msg->outParam = ai::UnicodeString::FromUTF8(out.str());
+					return kNoErr;
+				}
+
+				if (action == "hide-emory-centerlines") {
+					std::string messageText;
+					const bool ok = DuctworkGeometry::SetSelectedEmoryCenterlineVisibility(true, messageText);
+					std::ostringstream out;
+					out << "{\"ok\":" << (ok ? "true" : "false")
+						<< ",\"message\":\"" << messageText << "\"}";
+					msg->outParam = ai::UnicodeString::FromUTF8(out.str());
+					return kNoErr;
+				}
+
+				if (action == "show-emory-centerlines") {
+					std::string messageText;
+					const bool ok = DuctworkGeometry::SetSelectedEmoryCenterlineVisibility(false, messageText);
+					std::ostringstream out;
+					out << "{\"ok\":" << (ok ? "true" : "false")
+						<< ",\"message\":\"" << messageText << "\"}";
+					msg->outParam = ai::UnicodeString::FromUTF8(out.str());
+					return kNoErr;
+				}
+
 				if (action == "set-emory-start-segment") {
 					std::string messageText;
 					const bool ok = DuctworkGeometry::SetSelectedEmoryStartSegment(messageText);
+					std::ostringstream out;
+					out << "{\"ok\":" << (ok ? "true" : "false")
+						<< ",\"message\":\"" << messageText << "\"}";
+					msg->outParam = ai::UnicodeString::FromUTF8(out.str());
+					return kNoErr;
+				}
+
+				if (action == "clear-emory-start-segment") {
+					std::string messageText;
+					const bool ok = DuctworkGeometry::ClearSelectedEmoryStartSegment(messageText);
 					std::ostringstream out;
 					out << "{\"ok\":" << (ok ? "true" : "false")
 						<< ",\"message\":\"" << messageText << "\"}";
@@ -1048,6 +1102,17 @@ ASErr ProcessDuctworkPlugin::Message(char* caller, char* selector, void* message
 					const double width = ParseDouble(data, "width", 0.0);
 					std::string messageText;
 					const bool ok = DuctworkGeometry::ApplySelectedEmorySegmentWidth(width, messageText);
+					std::ostringstream out;
+					out << "{\"ok\":" << (ok ? "true" : "false")
+						<< ",\"message\":\"" << messageText << "\"}";
+					msg->outParam = ai::UnicodeString::FromUTF8(out.str());
+					return kNoErr;
+				}
+
+				if (action == "apply-emory-stroke-width") {
+					const double width = ParseDouble(data, "width", 0.0);
+					std::string messageText;
+					const bool ok = DuctworkGeometry::ApplySelectedEmoryStrokeWidth(width, messageText);
 					std::ostringstream out;
 					out << "{\"ok\":" << (ok ? "true" : "false")
 						<< ",\"message\":\"" << messageText << "\"}";
@@ -1857,6 +1922,7 @@ ASErr ProcessDuctworkPlugin::ProcessDuctwork(const ProcessDuctworkOptions& optio
 		optStream << "Options skipOrtho=" << options.skipOrtho
 			<< " skipAllBranchSegments=" << options.skipAllBranchSegments
 			<< " skipFinalRegisterSegment=" << options.skipFinalRegisterSegment
+			<< " skipFinalSegmentThickness=" << options.skipFinalSegmentThickness
 			<< " skipRegisterRotation=" << options.skipRegisterRotation
 			<< " enableRegisterCarve=" << options.enableRegisterCarve
 			<< " enableOverlapCarve=" << options.enableOverlapCarve
@@ -2173,6 +2239,10 @@ ASErr ProcessDuctworkPlugin::ProcessDuctwork(const ProcessDuctworkOptions& optio
 	} else if (!compoundPaths.empty()) {
 		DuctworkLog::Write(skipEmoryLineGraphics ? "Compound styles skipped for Emory body workflow" : "Compound styles skipped");
 	}
+
+	DuctworkGeometry::UpdateSelectedEmoryFinalSegmentThicknessMetadata(
+		ductworkPaths,
+		options.skipFinalRegisterSegment || options.skipFinalSegmentThickness);
 
 	{
 		StepTimer emoryBodyTimer("EmoryBodies");

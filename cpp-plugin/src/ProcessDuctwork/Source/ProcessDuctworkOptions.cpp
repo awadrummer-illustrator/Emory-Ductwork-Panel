@@ -62,6 +62,7 @@ ProcessDuctworkOptions::ProcessDuctworkOptions()
 	: skipOrtho(false),
 	skipAllBranchSegments(false),
 	skipFinalRegisterSegment(false),
+	skipFinalSegmentThickness(false),
 	skipRegisterRotation(false),
 	enableRegisterCarve(false),
 	enableOverlapCarve(false),
@@ -96,6 +97,12 @@ bool ProcessDuctworkOptions::ParseFromJson(const std::string& json)
 		bool value = false;
 		if (ParseBoolAt(json, pos, value)) {
 			skipFinalRegisterSegment = value;
+		}
+	}
+	if (ExtractKey(json, "skipFinalSegmentThickness", pos)) {
+		bool value = false;
+		if (ParseBoolAt(json, pos, value)) {
+			skipFinalSegmentThickness = value;
 		}
 	}
 	if (ExtractKey(json, "skipRegisterRotation", pos)) {

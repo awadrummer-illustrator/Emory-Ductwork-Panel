@@ -15,6 +15,7 @@ extern "C" {
 	AILayerSuite* sAILayer = NULL;
 	AIPathSuite* sAIPath = NULL;
 	AIPathStyleSuite* sAIPathStyle = NULL;
+	AIPaintStyleSuite* sAIPaintStyle = NULL;
 	AIPlacedSuite* sAIPlaced = NULL;
 	AIPanelSuite* sAIPanel = NULL;
 	AILiveEditSuite* sAILiveEdit = NULL;
@@ -43,6 +44,7 @@ ImportSuite gImportSuites[] =
 	kAILayerSuite, kAILayerSuiteVersion, &sAILayer,
 	kAIPathSuite, kAIPathSuiteVersion, &sAIPath,
 	kAIPathStyleSuite, kAIPathStyleSuiteVersion, &sAIPathStyle,
+	kAIPaintStyleSuite, kAIPaintStyleSuiteVersion, &sAIPaintStyle,
 	kAIPlacedSuite, kAIPlacedSuiteVersion, &sAIPlaced,
 	kAIPanelSuite, kAIPanelSuiteVersion, &sAIPanel,
 	kAILiveEditSuite, kAILiveEditSuiteVersion, &sAILiveEdit,

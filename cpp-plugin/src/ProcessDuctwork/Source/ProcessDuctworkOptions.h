@@ -8,6 +8,7 @@ struct ProcessDuctworkOptions
 	bool skipOrtho;
 	bool skipAllBranchSegments;
 	bool skipFinalRegisterSegment;
+	bool skipFinalSegmentThickness;
 	bool skipRegisterRotation;
 	bool enableRegisterCarve;
 	bool enableOverlapCarve;

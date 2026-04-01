@@ -15,6 +15,7 @@
 #include "AILayer.h"
 #include "AIPath.h"
 #include "AIPathStyle.h"
+#include "AIPaintStyle.h"
 #include "AIPlaced.h"
 #include "AIPanel.h"
 #include "AILiveEdit.h"
@@ -42,6 +43,7 @@ extern "C" AIEntrySuite* sAIEntry;
 extern "C" AILayerSuite* sAILayer;
 extern "C" AIPathSuite* sAIPath;
 extern "C" AIPathStyleSuite* sAIPathStyle;
+extern "C" AIPaintStyleSuite* sAIPaintStyle;
 extern "C" AIPlacedSuite* sAIPlaced;
 extern "C" AIPanelSuite* sAIPanel;
 extern "C" AILiveEditSuite* sAILiveEdit;

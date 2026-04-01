@@ -58,11 +58,11 @@ namespace
 	const char* ResolveComponentFile(const std::string& registerLayerName)
 	{
 		if (registerLayerName == "Thermostats") return "Thermostat.ai";
-		if (registerLayerName == "Units") return "Unit.ai";
+		if (registerLayerName == "Units") return "Unit Emory.ai";
 		if (registerLayerName == "Secondary Exhaust Registers") return "Secondary Exhaust Register.ai";
 		if (registerLayerName == "Exhaust Registers") return "Exhaust Register.ai";
 		if (registerLayerName == "Orange Register") return "Orange Register.ai";
-		if (registerLayerName == "Rectangular Registers") return "Rectangular Register.ai";
+		if (registerLayerName == "Rectangular Registers") return "Rectangular Register Emory.ai";
 		if (registerLayerName == "Square Registers") return "Square Register.ai";
 		if (registerLayerName == "Circular Registers") return "Circular Register.ai";
 		return nullptr;
@@ -881,7 +881,7 @@ DuctworkUnitStats DuctworkParts::CreateUnitAnchorsAndGraphics(const std::vector<
 		return stats;
 	}
 
-	const std::string assetPathStr = std::string(kAssetsPath) + "Unit.ai";
+	const std::string assetPathStr = std::string(kAssetsPath) + ResolveComponentFile("Units");
 	bool canPlaceGraphics = false;
 	if (!skipGraphics) {
 		canPlaceGraphics = std::filesystem::exists(std::filesystem::path(assetPathStr));

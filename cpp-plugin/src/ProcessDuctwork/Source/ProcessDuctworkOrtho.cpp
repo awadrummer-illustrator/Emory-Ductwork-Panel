@@ -379,11 +379,21 @@ OrthoResult DuctworkOrtho::ApplyToPaths(std::vector<DuctworkPath>& paths, double
 		}
 		for (ai::int16 segIndex = 0; segIndex < count; ++segIndex) {
 			const DuctworkPoint& pt = paths[i].points[static_cast<size_t>(segIndex)];
+			AIRealPoint oldAnchor = segments[segIndex].p;
+			AIReal dx = static_cast<AIReal>(pt.x) - oldAnchor.h;
+			AIReal dy = static_cast<AIReal>(pt.y) - oldAnchor.v;
 			segments[segIndex].p.h = static_cast<AIReal>(pt.x);
 			segments[segIndex].p.v = static_cast<AIReal>(pt.y);
-			segments[segIndex].in = segments[segIndex].p;
-			segments[segIndex].out = segments[segIndex].p;
-			segments[segIndex].corner = true;
+			if (eligible[i]) {
+				segments[segIndex].in = segments[segIndex].p;
+				segments[segIndex].out = segments[segIndex].p;
+				segments[segIndex].corner = true;
+			} else {
+				segments[segIndex].in.h += dx;
+				segments[segIndex].in.v += dy;
+				segments[segIndex].out.h += dx;
+				segments[segIndex].out.v += dy;
+			}
 		}
 		if (!sAIPath->SetPathSegments(art, 0, count, &segments[0])) {
 			++result.pathsTouched;
