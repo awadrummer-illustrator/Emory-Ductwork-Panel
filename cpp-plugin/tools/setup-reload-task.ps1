@@ -11,7 +11,7 @@ if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administra
     exit
 }
 
-$taskName = "Reload Illustrator Ductwork"
+$taskName = "Reload Illustrator Emory Ductwork"
 $scriptPath = Join-Path $PSScriptRoot "reload-illustrator.ps1"
 
 Write-Host "Setting up scheduled task: $taskName"

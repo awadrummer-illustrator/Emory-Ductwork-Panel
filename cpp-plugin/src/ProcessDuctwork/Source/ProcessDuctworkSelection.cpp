@@ -48,6 +48,23 @@ namespace
 					current = next;
 				}
 			}
+			return;
+		}
+
+		if (type == kGroupArt) {
+			AIArtHandle child = nullptr;
+			if (!sAIArt->GetArtFirstChild(art, &child) && child) {
+				const bool childIncludeAll = includeAllChildren || IsArtSelected(art);
+				AIArtHandle current = child;
+				while (current) {
+					CollectPathsFromArt(current, childIncludeAll, outPaths);
+					AIArtHandle next = nullptr;
+					if (sAIArt->GetArtSibling(current, &next)) {
+						break;
+					}
+					current = next;
+				}
+			}
 		}
 	}
 }

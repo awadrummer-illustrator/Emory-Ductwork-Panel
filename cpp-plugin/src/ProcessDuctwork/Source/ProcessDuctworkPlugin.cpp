@@ -980,7 +980,10 @@ ASErr ProcessDuctworkPlugin::Message(char* caller, char* selector, void* message
 				if (action == "process-placed-api") {
 					ProcessDuctworkOptions defaults;
 					double rotationOverride = 0.0;
-					if (fPanel.GetRotationOverrideValue(rotationOverride)) {
+					if (data.find("rotationOverride") != data.end()) {
+						defaults.hasRotationOverride = true;
+						defaults.rotationOverride = ParseDouble(data, "rotationOverride", 0.0);
+					} else if (fPanel.GetRotationOverrideValue(rotationOverride)) {
 						defaults.hasRotationOverride = true;
 						defaults.rotationOverride = rotationOverride;
 					}
@@ -1023,6 +1026,16 @@ ASErr ProcessDuctworkPlugin::Message(char* caller, char* selector, void* message
 				if (action == "toggle-connector-style") {
 					std::string messageText;
 					const bool ok = DuctworkGeometry::ToggleSelectedEmoryConnectorStyles(messageText);
+					std::ostringstream out;
+					out << "{\"ok\":" << (ok ? "true" : "false")
+						<< ",\"message\":\"" << messageText << "\"}";
+					msg->outParam = ai::UnicodeString::FromUTF8(out.str());
+					return kNoErr;
+				}
+
+				if (action == "toggle-terminal-segment-style") {
+					std::string messageText;
+					const bool ok = DuctworkGeometry::ToggleSelectedEmoryTerminalSegmentStyle(messageText);
 					std::ostringstream out;
 					out << "{\"ok\":" << (ok ? "true" : "false")
 						<< ",\"message\":\"" << messageText << "\"}";
@@ -2143,6 +2156,7 @@ ASErr ProcessDuctworkPlugin::ProcessDuctwork(const ProcessDuctworkOptions& optio
 		StepTimer carveTimer("Carve");
 		DuctworkCarve::CarveStats carveStats;
 		std::vector<AIArtHandle> updatedSelection = selectedPaths;
+		DuctworkGeometry::EnsureEmoryBackupCenterlines(updatedSelection);
 		if (options.enableRegisterCarve) {
 			DuctworkCarve::CarveStats regStats = DuctworkCarve::ApplyRegisterCarve(ductworkPaths, updatedSelection);
 			carveStats.registerCarves += regStats.registerCarves;

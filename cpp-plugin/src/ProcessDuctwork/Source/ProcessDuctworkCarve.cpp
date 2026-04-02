@@ -175,6 +175,9 @@ namespace
 			sAIArt->DisposeArt(secondArt);
 			return false;
 		}
+		DuctworkGeometry::CopyEmoryCenterlineIdentity(path, firstArt);
+		DuctworkGeometry::CopyEmoryCenterlineIdentity(path, secondArt);
+		DuctworkGeometry::SplitEmoryCenterlineMetadata(path, segIndex, firstArt, secondArt);
 		outFirst = firstArt;
 		outSecond = secondArt;
 		return true;

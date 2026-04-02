@@ -6,7 +6,7 @@
 #include <ctime>
 #include <sstream>
 
-bool DuctworkLog::sEnabled = false; // Disabled for performance
+bool DuctworkLog::sEnabled = true;
 
 void DuctworkLog::Write(const std::string& message)
 {
@@ -29,7 +29,7 @@ void DuctworkLog::Write(const std::string& message)
 			path += "\\";
 		}
 	}
-	path += "ProcessDuctwork.log";
+	path += "EmoryDuctwork.log";
 
 	FILE* file = nullptr;
 	if (fopen_s(&file, path.c_str(), "a") != 0 || !file) {

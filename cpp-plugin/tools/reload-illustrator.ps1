@@ -1,9 +1,19 @@
 ﻿$ErrorActionPreference = "Stop"
 $root = Split-Path -Parent $PSScriptRoot
+$taskName = "Reload Illustrator Ductwork"
+$requestFile = Join-Path $env:TEMP "ductwork-reload-request.txt"
 
 $principal = New-Object Security.Principal.WindowsPrincipal([Security.Principal.WindowsIdentity]::GetCurrent())
 if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
-	Write-Host "[Reload] Not running elevated. Relaunching as admin..."
+	$scheduledTask = Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
+	if ($scheduledTask) {
+		Write-Host "[Reload] Not running elevated. Invoking scheduled task '$taskName'..."
+		Set-Content -Path $requestFile -Value $PSCommandPath -Encoding UTF8
+		Start-ScheduledTask -TaskName $taskName
+		exit
+	}
+
+	Write-Host "[Reload] Not running elevated and scheduled task '$taskName' was not found. Relaunching as admin..."
 	$argList = "-ExecutionPolicy Bypass -File `"$PSCommandPath`""
 	Start-Process -FilePath "powershell.exe" -ArgumentList $argList -Verb RunAs
 	exit
@@ -13,6 +23,49 @@ $pluginSource = Join-Path $root "build\win\x64\Release\EmoryDuctwork.aip"
 $pluginDestDir = "C:\Program Files\Adobe\Adobe Illustrator 2024\Plug-ins\DuctworkMenu"
 $testFile = "E:\Work\Work\Floorplans\Test Emory Ductwork.ai"
 $illustratorExe = "C:\Program Files\Adobe\Adobe Illustrator 2024\Support Files\Contents\Windows\Illustrator.exe"
+
+function Get-LatestRecentIllustratorFile {
+	$recentDir = Join-Path $env:APPDATA "Microsoft\Windows\Recent"
+	if (!(Test-Path $recentDir)) {
+		return $null
+	}
+
+	$shell = New-Object -ComObject WScript.Shell
+	try {
+		$resolved = Get-ChildItem -Path $recentDir -Filter *.lnk -File -ErrorAction SilentlyContinue |
+			Sort-Object LastWriteTime -Descending |
+			ForEach-Object {
+				try {
+					$shortcut = $shell.CreateShortcut($_.FullName)
+					$targetPath = $shortcut.TargetPath
+					if ([string]::IsNullOrWhiteSpace($targetPath)) {
+						return
+					}
+					if (!(Test-Path $targetPath)) {
+						return
+					}
+					if ([System.IO.Path]::GetExtension($targetPath).ToLowerInvariant() -ne ".ai") {
+						return
+					}
+
+					[PSCustomObject]@{
+						ShortcutPath = $_.FullName
+						TargetPath   = $targetPath
+						LastWriteTime = $_.LastWriteTime
+					}
+				} catch {
+				}
+			} |
+			Select-Object -First 1
+
+		if ($resolved) {
+			return $resolved.TargetPath
+		}
+		return $null
+	} finally {
+		[System.Runtime.Interopservices.Marshal]::ReleaseComObject($shell) | Out-Null
+	}
+}
 
 $projectFile = Join-Path $root "src\ProcessDuctwork\EmoryDuctwork.vcxproj"
 $msbuild = "C:\Program Files\Microsoft Visual Studio\2022\Community\MSBuild\Current\Bin\MSBuild.exe"
@@ -85,5 +138,16 @@ if ($robocopyExit -ge 8) {
 }
 
 Write-Host "[Reload] Launching Illustrator..."
-Start-Process -FilePath $illustratorExe -ArgumentList "`"$testFile`""
+$launchFile = Get-LatestRecentIllustratorFile
+if ([string]::IsNullOrWhiteSpace($launchFile)) {
+	$launchFile = $testFile
+}
+
+if (-not [string]::IsNullOrWhiteSpace($launchFile) -and (Test-Path $launchFile)) {
+	Write-Host "[Reload] Opening file: $launchFile"
+	Start-Process -FilePath $illustratorExe -ArgumentList "`"$launchFile`""
+} else {
+	Write-Warning "[Reload] No recent Illustrator file found and fallback file is missing. Launching without a document."
+	Start-Process -FilePath $illustratorExe
+}
 
