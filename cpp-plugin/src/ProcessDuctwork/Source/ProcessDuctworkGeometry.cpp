@@ -2881,12 +2881,30 @@ namespace
 		return linkedSourceIds.size() > 1;
 	}
 
-	bool HasStoredSegmentWidths(AIArtHandle sourceArt)
+	size_t CountSerializedSegmentWidths(const std::string& serialized)
+	{
+		if (serialized.empty()) {
+			return 0;
+		}
+
+		size_t count = 0;
+		std::stringstream ss(serialized);
+		std::string token;
+		while (std::getline(ss, token, ',')) {
+			++count;
+		}
+		return count;
+	}
+
+	bool HasStoredSegmentWidths(AIArtHandle sourceArt, size_t expectedSegmentCount)
 	{
 		std::string serialized;
-		return sourceArt &&
-			DuctworkMetadata::GetString(sourceArt, kEmorySegmentWidthsKey, serialized) &&
-			!serialized.empty();
+		if (!sourceArt ||
+			!DuctworkMetadata::GetString(sourceArt, kEmorySegmentWidthsKey, serialized) ||
+			serialized.empty()) {
+			return false;
+		}
+		return CountSerializedSegmentWidths(serialized) == expectedSegmentCount;
 	}
 
 	bool BuildSegmentDirection(const std::vector<DuctworkPoint>& points, int segmentIndex, Vec2& outDir)
@@ -3649,7 +3667,7 @@ void ClearStartSegmentIndex(AIArtHandle sourceArt)
 
 	double storedBodyWidth = 0.0;
 	const bool hasStoredBodyWidth = ReadStoredSourceBodyWidth(sourceArt, storedBodyWidth) && storedBodyWidth > 0.0;
-	const bool hasStoredWidths = HasStoredSegmentWidths(sourceArt);
+	const bool hasStoredWidths = HasStoredSegmentWidths(sourceArt, segmentCount);
 	double generatedBodyWidth = 0.0;
 	const bool hasGeneratedBodyWidth = FindGeneratedBodyWidthForSourceId(sourceId, generatedBodyWidth) && generatedBodyWidth > 0.0;
 	const bool preserveWidthMetadata = hasStoredWidths || hasStoredBodyWidth || hasGeneratedBodyWidth;
@@ -3873,21 +3891,6 @@ void ClearStartSegmentIndex(AIArtHandle sourceArt)
 		return true;
 	}
 
-	size_t CountSerializedSegmentWidths(const std::string& serialized)
-	{
-		if (serialized.empty()) {
-			return 0;
-		}
-
-		size_t count = 0;
-		std::stringstream ss(serialized);
-		std::string token;
-		while (std::getline(ss, token, ',')) {
-			++count;
-		}
-		return count;
-	}
-
 	void LocalizeVisibleFragmentMetadataFromBackup(const std::set<std::string>& sourceIds, bool forceUpdate = false)
 	{
 		if (sourceIds.empty()) {
@@ -3924,7 +3927,7 @@ void ClearStartSegmentIndex(AIArtHandle sourceArt)
 
 			std::vector<double> backupWidths;
 			ReadSegmentWidths(backupArt, backupSegmentCount, defaultWidth, backupWidths);
-			if (!HasStoredSegmentWidths(backupArt)) {
+			if (!HasStoredSegmentWidths(backupArt, backupSegmentCount)) {
 				ApplyDefaultStraightChainTapers(backupArt,
 					backupPoints,
 					ReadStartSegmentIndex(backupArt, backupSegmentCount),
@@ -5300,7 +5303,7 @@ void ClearStartSegmentIndex(AIArtHandle sourceArt)
 			}
 			ResolveSourceStrokeWidth(art, sourceId, state.defaultWidth, state.sourceStrokeWidth);
 
-			const bool hasStoredSegmentWidths = HasStoredSegmentWidths(art);
+			const bool hasStoredSegmentWidths = HasStoredSegmentWidths(art, static_cast<size_t>(segmentCount));
 			ReadSegmentWidths(art, static_cast<size_t>(segmentCount), state.defaultWidth, state.widths);
 			NormalizeGuideLikeStoredWidths(art, sourceId, points, state.startSegmentIndex, state.defaultWidth, state.widths);
 			if (!hasStoredSegmentWidths) {
@@ -5340,7 +5343,7 @@ void ClearStartSegmentIndex(AIArtHandle sourceArt)
 
 			std::vector<double> backupWidths;
 			ReadSegmentWidths(backupArt, backupSegmentCount, defaultWidth, backupWidths);
-			if (!HasStoredSegmentWidths(backupArt)) {
+			if (!HasStoredSegmentWidths(backupArt, backupSegmentCount)) {
 				ApplyDefaultStraightChainTapers(backupArt,
 					backupPath.points,
 					ReadStartSegmentIndex(backupArt, backupSegmentCount),
@@ -7039,7 +7042,7 @@ bool BuildRoundCornerPolygon(const ConnectorSpec& connector, const CornerPairing
 				<< " end=" << SerializePointForLog(points.back());
 			DuctworkLog::Write(logStream.str());
 		}
-		if (!HasStoredSegmentWidths(path.art)) {
+		if (!HasStoredSegmentWidths(path.art, segmentCount)) {
 			const int startSegmentIndex = ReadStartSegmentIndex(path.art, segmentCount);
 			ApplyDefaultStraightChainTapers(path.art, points, startSegmentIndex, segmentWidths);
 			WriteSegmentWidths(path.art, segmentWidths);
@@ -8932,7 +8935,7 @@ bool DuctworkGeometry::GetSelectedEmorySegmentState(std::string& outJson)
 	const bool hasExplicitStart = (selectedStateIndex >= 0 && selectedStateIndex < static_cast<int>(states.size()))
 		? states[selectedStateIndex].hasExplicitStart
 		: HasExplicitStartSegmentIndex(sourceArt);
-	if (!HasStoredSegmentWidths(sourceArt)) {
+	if (!HasStoredSegmentWidths(sourceArt, segmentCount)) {
 		ApplyDefaultStraightChainTapers(sourceArt, points, startSegmentIndex, segmentWidths);
 	}
 	std::vector<StraightChainInfo> straightChains;
@@ -9404,7 +9407,7 @@ bool DuctworkGeometry::SetSelectedEmoryTaperAlignment(const std::string& alignme
 
 		std::vector<double> widths;
 		ReadSegmentWidths(sourceArt, points.size() - 1, defaultWidth, widths);
-		if (!HasStoredSegmentWidths(sourceArt)) {
+		if (!HasStoredSegmentWidths(sourceArt, points.size() - 1)) {
 			const int startSegmentIndex = ReadStartSegmentIndex(sourceArt, points.size() - 1);
 			ApplyDefaultStraightChainTapers(sourceArt, points, startSegmentIndex, widths);
 			WriteSegmentWidths(sourceArt, widths);
