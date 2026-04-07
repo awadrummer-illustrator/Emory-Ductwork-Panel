@@ -73,6 +73,9 @@ private:
 	ASErr AddTools(SPInterfaceMessage* message);
 	ASErr ProcessDuctwork(const ProcessDuctworkOptions& options, ASBoolean showAlert, ai::UnicodeString* outParam);
 	ASErr SelectDuctworkParts(AIDocumentHandle document);
+
+	// Direct C++ → CEP panel communication (bypasses ExtendScript)
+	void SendEventToPanel(const char* eventId, const char* jsonData);
 };
 
 #endif // __ProcessDuctworkPLUGIN_H__

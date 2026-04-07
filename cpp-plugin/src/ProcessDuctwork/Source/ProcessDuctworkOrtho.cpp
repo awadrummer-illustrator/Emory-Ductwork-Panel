@@ -8,10 +8,136 @@
 #include "ProcessDuctworkSuites.h"
 
 #include <array>
+#include <cstdint>
 #include <cmath>
+#include <set>
 
 namespace
 {
+	struct PathBounds
+	{
+		double minX = 0.0;
+		double minY = 0.0;
+		double maxX = 0.0;
+		double maxY = 0.0;
+		bool valid = false;
+	};
+
+	struct UnsafeConnectionKey
+	{
+		uintptr_t artA = 0;
+		uintptr_t artB = 0;
+		int type = 0;
+
+		bool operator<(const UnsafeConnectionKey& other) const
+		{
+			if (artA != other.artA) return artA < other.artA;
+			if (artB != other.artB) return artB < other.artB;
+			return type < other.type;
+		}
+	};
+
+	struct UnsafeConnectionSummary
+	{
+		int count = 0;
+		std::set<UnsafeConnectionKey> keys;
+	};
+
+	PathBounds ComputePathBounds(const DuctworkPath& path)
+	{
+		PathBounds bounds;
+		if (path.points.empty()) {
+			return bounds;
+		}
+
+		bounds.minX = bounds.maxX = path.points.front().x;
+		bounds.minY = bounds.maxY = path.points.front().y;
+		bounds.valid = true;
+		for (size_t i = 1; i < path.points.size(); ++i) {
+			const DuctworkPoint& point = path.points[i];
+			if (point.x < bounds.minX) bounds.minX = point.x;
+			if (point.x > bounds.maxX) bounds.maxX = point.x;
+			if (point.y < bounds.minY) bounds.minY = point.y;
+			if (point.y > bounds.maxY) bounds.maxY = point.y;
+		}
+		return bounds;
+	}
+
+	PathBounds ComputeCombinedBounds(const std::vector<DuctworkPath>& paths)
+	{
+		PathBounds combined;
+		for (size_t i = 0; i < paths.size(); ++i) {
+			const PathBounds bounds = ComputePathBounds(paths[i]);
+			if (!bounds.valid) {
+				continue;
+			}
+			if (!combined.valid) {
+				combined = bounds;
+				continue;
+			}
+			if (bounds.minX < combined.minX) combined.minX = bounds.minX;
+			if (bounds.minY < combined.minY) combined.minY = bounds.minY;
+			if (bounds.maxX > combined.maxX) combined.maxX = bounds.maxX;
+			if (bounds.maxY > combined.maxY) combined.maxY = bounds.maxY;
+		}
+		return combined;
+	}
+
+	bool BoundsOverlap(const PathBounds& a, const PathBounds& b, double padding)
+	{
+		if (!a.valid || !b.valid) {
+			return false;
+		}
+		return !(a.maxX + padding < b.minX ||
+			b.maxX + padding < a.minX ||
+			a.maxY + padding < b.minY ||
+			b.maxY + padding < a.minY);
+	}
+
+	bool SegmentsOverlapCollinear(const DuctworkPoint& a1, const DuctworkPoint& a2,
+		const DuctworkPoint& b1, const DuctworkPoint& b2,
+		double distTolerance, double angleToleranceDeg)
+	{
+		const double ax = a2.x - a1.x;
+		const double ay = a2.y - a1.y;
+		const double bx = b2.x - b1.x;
+		const double by = b2.y - b1.y;
+		const double aLen = std::sqrt(ax * ax + ay * ay);
+		const double bLen = std::sqrt(bx * bx + by * by);
+		if (aLen < 1e-6 || bLen < 1e-6) {
+			return false;
+		}
+
+		const double dot = (ax * bx + ay * by) / (aLen * bLen);
+		const double cosTol = std::cos(angleToleranceDeg * (3.14159265358979323846 / 180.0));
+		if (std::fabs(dot) < cosTol) {
+			return false;
+		}
+
+		auto distancePointToLine = [](const DuctworkPoint& p, const DuctworkPoint& a, const DuctworkPoint& b) {
+			double t = 0.0;
+			const DuctworkPoint closest = DuctworkMath::ClosestPointOnSegment(a, b, p, t);
+			return std::sqrt(DuctworkMath::Dist2(p, closest));
+		};
+
+		if (distancePointToLine(b1, a1, a2) > distTolerance &&
+			distancePointToLine(b2, a1, a2) > distTolerance) {
+			return false;
+		}
+
+		const double dirX = ax / aLen;
+		const double dirY = ay / aLen;
+		const double aStart = 0.0;
+		const double aEnd = aLen;
+		const double bStart = (b1.x - a1.x) * dirX + (b1.y - a1.y) * dirY;
+		const double bEnd = (b2.x - a1.x) * dirX + (b2.y - a1.y) * dirY;
+		const double bMin = (bStart < bEnd) ? bStart : bEnd;
+		const double bMax = (bStart > bEnd) ? bStart : bEnd;
+		const double overlapStart = (aStart > bMin) ? aStart : bMin;
+		const double overlapEnd = (aEnd < bMax) ? aEnd : bMax;
+		return overlapEnd >= overlapStart;
+	}
+
 	bool IsUnitPairLayerName(const std::string& a, const std::string& b)
 	{
 		if (a == b) {
@@ -78,11 +204,172 @@ namespace
 		double t = 0.0;
 		return DuctworkMath::ClosestPointOnSegment(a, b, p, t);
 	}
+
+	static bool AreAdjacentSegments(size_t aSeg, size_t bSeg, size_t segmentCount, bool closed)
+	{
+		if (aSeg == bSeg) {
+			return true;
+		}
+		if ((aSeg + 1 == bSeg) || (bSeg + 1 == aSeg)) {
+			return true;
+		}
+		if (closed && segmentCount > 2) {
+			if ((aSeg == 0 && bSeg + 1 == segmentCount) ||
+				(bSeg == 0 && aSeg + 1 == segmentCount)) {
+				return true;
+			}
+		}
+		return false;
+	}
+
+	static bool PathHasNonAdjacentSelfIntersection(const DuctworkPath& path)
+	{
+		const size_t pointCount = path.points.size();
+		if (pointCount < 4) {
+			return false;
+		}
+
+		const size_t segmentCount = path.closed ? pointCount : (pointCount - 1);
+		const double overlapDistTolerance = 3.0;
+		const double overlapAngleTolerance = 5.0;
+		for (size_t aSeg = 0; aSeg < segmentCount; ++aSeg) {
+			const DuctworkPoint& a1 = path.points[aSeg];
+			const DuctworkPoint& a2 = path.points[(aSeg + 1) % pointCount];
+			for (size_t bSeg = aSeg + 1; bSeg < segmentCount; ++bSeg) {
+				if (AreAdjacentSegments(aSeg, bSeg, segmentCount, path.closed)) {
+					continue;
+				}
+
+				const DuctworkPoint& b1 = path.points[bSeg];
+				const DuctworkPoint& b2 = path.points[(bSeg + 1) % pointCount];
+				if (SegmentsOverlapCollinear(a1, a2, b1, b2, overlapDistTolerance, overlapAngleTolerance)) {
+					return true;
+				}
+
+				DuctworkPoint intersection;
+				if (DuctworkMath::SegmentIntersection(a1, a2, b1, b2, intersection)) {
+					return true;
+				}
+			}
+		}
+
+		return false;
+	}
+
+	static UnsafeConnectionSummary SummarizeUnsafeConnectionsWithContext(const std::vector<DuctworkPath>& selectedPaths,
+		const std::vector<DuctworkPath>& documentContextPaths)
+	{
+		UnsafeConnectionSummary summary;
+		if (selectedPaths.empty()) {
+			return summary;
+		}
+
+		const double kContextPadding = 20.0;
+		const size_t selectedCount = selectedPaths.size();
+		const PathBounds selectedBounds = ComputeCombinedBounds(selectedPaths);
+		std::set<std::string> selectedLayers;
+		for (size_t i = 0; i < selectedPaths.size(); ++i) {
+			if (!selectedPaths[i].layerName.empty()) {
+				selectedLayers.insert(selectedPaths[i].layerName);
+			}
+		}
+
+		std::vector<DuctworkPath> combinedPaths;
+		combinedPaths.reserve(selectedPaths.size() + documentContextPaths.size());
+		combinedPaths.insert(combinedPaths.end(), selectedPaths.begin(), selectedPaths.end());
+		for (size_t i = 0; i < documentContextPaths.size(); ++i) {
+			const DuctworkPath& contextPath = documentContextPaths[i];
+			if (selectedLayers.find(contextPath.layerName) == selectedLayers.end()) {
+				continue;
+			}
+			if (!BoundsOverlap(selectedBounds, ComputePathBounds(contextPath), kContextPadding)) {
+				continue;
+			}
+			combinedPaths.push_back(contextPath);
+		}
+
+		std::vector<DuctworkConnection> connections;
+		DuctworkConnections::FindConnections(
+			combinedPaths,
+			2.0,
+			3.0,
+			15.0,
+			10.0,
+			true,
+			connections);
+
+		for (size_t i = 0; i < connections.size(); ++i) {
+			const DuctworkConnection& connection = connections[i];
+			const bool touchesSelection =
+				(connection.a >= 0 && connection.a < static_cast<int>(selectedCount)) ||
+				(connection.b >= 0 && connection.b < static_cast<int>(selectedCount));
+			if (!touchesSelection) {
+				continue;
+			}
+			if (connection.type == kConnectionEndpointToSegment ||
+				connection.type == kConnectionSegmentIntersection) {
+				++summary.count;
+				uintptr_t artA = 0;
+				uintptr_t artB = 0;
+				if (connection.a >= 0 && connection.a < static_cast<int>(combinedPaths.size())) {
+					artA = reinterpret_cast<uintptr_t>(combinedPaths[static_cast<size_t>(connection.a)].art);
+				}
+				if (connection.b >= 0 && connection.b < static_cast<int>(combinedPaths.size())) {
+					artB = reinterpret_cast<uintptr_t>(combinedPaths[static_cast<size_t>(connection.b)].art);
+				}
+				if (artB < artA) {
+					const uintptr_t swapArt = artA;
+					artA = artB;
+					artB = swapArt;
+				}
+				UnsafeConnectionKey key;
+				key.artA = artA;
+				key.artB = artB;
+				key.type = static_cast<int>(connection.type);
+				summary.keys.insert(key);
+			}
+		}
+		return summary;
+	}
+
+	static bool ValidateCandidatePaths(const std::vector<DuctworkPath>& candidatePaths,
+		const std::vector<DuctworkPath>& documentContextPaths,
+		const UnsafeConnectionSummary& currentUnsafeConnections,
+		int dirtyIndexA,
+		int dirtyIndexB,
+		UnsafeConnectionSummary& outCandidateUnsafeConnections)
+	{
+		const int dirtyIndices[2] = { dirtyIndexA, dirtyIndexB };
+		for (int idx = 0; idx < 2; ++idx) {
+			const int dirtyIndex = dirtyIndices[idx];
+			if (dirtyIndex < 0 || dirtyIndex >= static_cast<int>(candidatePaths.size())) {
+				continue;
+			}
+			if (PathHasNonAdjacentSelfIntersection(candidatePaths[static_cast<size_t>(dirtyIndex)])) {
+				return false;
+			}
+		}
+
+		outCandidateUnsafeConnections =
+			SummarizeUnsafeConnectionsWithContext(candidatePaths, documentContextPaths);
+		if (outCandidateUnsafeConnections.count > currentUnsafeConnections.count) {
+			return false;
+		}
+		for (std::set<UnsafeConnectionKey>::const_iterator it = outCandidateUnsafeConnections.keys.begin();
+			it != outCandidateUnsafeConnections.keys.end();
+			++it) {
+			if (currentUnsafeConnections.keys.find(*it) == currentUnsafeConnections.keys.end()) {
+				return false;
+			}
+		}
+		return true;
+	}
 }
 
 OrthoResult DuctworkOrtho::ApplyToPaths(std::vector<DuctworkPath>& paths, double snapThresholdDegrees,
 	bool hasRotationOverride, double rotationOverrideDegrees,
 	const std::vector<DuctworkConnection>& preConnections,
+	const std::vector<DuctworkPath>& documentContextPaths,
 	bool skipAllBranchSegments,
 	bool skipFinalRegisterSegment)
 {
@@ -103,6 +390,8 @@ OrthoResult DuctworkOrtho::ApplyToPaths(std::vector<DuctworkPath>& paths, double
 	std::vector<bool> eligible(paths.size(), false);
 	std::vector<std::array<bool, 2>> endpointConnected(paths.size(), { false, false });
 	std::vector<std::array<bool, 2>> endpointConnectedEndpoint(paths.size(), { false, false });
+	UnsafeConnectionSummary currentUnsafeConnections =
+		SummarizeUnsafeConnectionsWithContext(paths, documentContextPaths);
 
 	if (skipFinalRegisterSegment || skipAllBranchSegments) {
 		for (size_t i = 0; i < preConnections.size(); ++i) {
@@ -153,13 +442,25 @@ OrthoResult DuctworkOrtho::ApplyToPaths(std::vector<DuctworkPath>& paths, double
 		const std::string& layerB = paths[conn.b].layerName;
 		if (layerA == layerB) continue; // same-layer handled post-ortho
 
-		DuctworkPoint& aPt = paths[conn.a].points[static_cast<size_t>(conn.endpointA)];
-		DuctworkPoint& bPt = paths[conn.b].points[static_cast<size_t>(conn.endpointB)];
+		const DuctworkPoint& aPt = paths[conn.a].points[static_cast<size_t>(conn.endpointA)];
+		const DuctworkPoint& bPt = paths[conn.b].points[static_cast<size_t>(conn.endpointB)];
 		DuctworkPoint merged = {};
 		merged.x = (aPt.x + bPt.x) * 0.5;
 		merged.y = (aPt.y + bPt.y) * 0.5;
-		aPt = merged;
-		bPt = merged;
+		std::vector<DuctworkPath> candidatePaths(paths);
+		candidatePaths[conn.a].points[static_cast<size_t>(conn.endpointA)] = merged;
+		candidatePaths[conn.b].points[static_cast<size_t>(conn.endpointB)] = merged;
+		UnsafeConnectionSummary candidateUnsafeConnections;
+		if (!ValidateCandidatePaths(candidatePaths,
+			documentContextPaths,
+			currentUnsafeConnections,
+			conn.a,
+			conn.b,
+			candidateUnsafeConnections)) {
+			continue;
+		}
+		paths.swap(candidatePaths);
+		currentUnsafeConnections = candidateUnsafeConnections;
 		touched[conn.a] = true;
 		touched[conn.b] = true;
 
@@ -281,9 +582,22 @@ OrthoResult DuctworkOrtho::ApplyToPaths(std::vector<DuctworkPath>& paths, double
 
 			const double newX = p1.x + unitX * length;
 			const double newY = p1.y + unitY * length;
+			std::vector<DuctworkPath> candidatePaths(paths);
+			candidatePaths[i].points[moveIndex].x = newX;
+			candidatePaths[i].points[moveIndex].y = newY;
 
-			paths[i].points[moveIndex].x = newX;
-			paths[i].points[moveIndex].y = newY;
+			UnsafeConnectionSummary candidateUnsafeConnections;
+			if (!ValidateCandidatePaths(candidatePaths,
+				documentContextPaths,
+				currentUnsafeConnections,
+				static_cast<int>(i),
+				-1,
+				candidateUnsafeConnections)) {
+				continue;
+			}
+
+			paths.swap(candidatePaths);
+			currentUnsafeConnections = candidateUnsafeConnections;
 			++result.segmentsSnapped;
 			touched[i] = true;
 		}
@@ -318,8 +632,20 @@ OrthoResult DuctworkOrtho::ApplyToPaths(std::vector<DuctworkPath>& paths, double
 			DuctworkPoint merged = {};
 			merged.x = (aPt.x + bPt.x) * 0.5;
 			merged.y = (aPt.y + bPt.y) * 0.5;
-			paths[conn.a].points[static_cast<size_t>(conn.endpointA)] = merged;
-			paths[conn.b].points[static_cast<size_t>(conn.endpointB)] = merged;
+			std::vector<DuctworkPath> candidatePaths(paths);
+			candidatePaths[conn.a].points[static_cast<size_t>(conn.endpointA)] = merged;
+			candidatePaths[conn.b].points[static_cast<size_t>(conn.endpointB)] = merged;
+			UnsafeConnectionSummary candidateUnsafeConnections;
+			if (!ValidateCandidatePaths(candidatePaths,
+				documentContextPaths,
+				currentUnsafeConnections,
+				conn.a,
+				conn.b,
+				candidateUnsafeConnections)) {
+				continue;
+			}
+			paths.swap(candidatePaths);
+			currentUnsafeConnections = candidateUnsafeConnections;
 			touched[conn.a] = true;
 			touched[conn.b] = true;
 			continue;
@@ -352,7 +678,19 @@ OrthoResult DuctworkOrtho::ApplyToPaths(std::vector<DuctworkPath>& paths, double
 			const DuctworkPoint& segB = segmentPoints[static_cast<size_t>(segmentIndex + 1)];
 			const DuctworkPoint& endpoint = paths[endpointPath].points[static_cast<size_t>(endpointIndex)];
 			const DuctworkPoint projected = ClosestPointOnSegment(segA, segB, endpoint);
-			paths[endpointPath].points[static_cast<size_t>(endpointIndex)] = projected;
+			std::vector<DuctworkPath> candidatePaths(paths);
+			candidatePaths[endpointPath].points[static_cast<size_t>(endpointIndex)] = projected;
+			UnsafeConnectionSummary candidateUnsafeConnections;
+			if (!ValidateCandidatePaths(candidatePaths,
+				documentContextPaths,
+				currentUnsafeConnections,
+				endpointPath,
+				-1,
+				candidateUnsafeConnections)) {
+				continue;
+			}
+			paths.swap(candidatePaths);
+			currentUnsafeConnections = candidateUnsafeConnections;
 			touched[endpointPath] = true;
 		}
 	}

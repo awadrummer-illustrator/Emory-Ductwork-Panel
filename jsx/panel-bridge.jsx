@@ -2747,6 +2747,31 @@ function MDUX_moveToLayerBridge(optionsJSON) {
             return false;
         }
 
+        function isReplacementTargetItem(item, layerName) {
+            if (!item || !layerName) return false;
+            try {
+                if (item.typename === 'PlacedItem') {
+                    return isValidDuctworkLayer(layerName);
+                }
+                if (item.typename === 'PathItem') {
+                    return item.pathPoints && item.pathPoints.length === 1 && isValidDuctworkLayer(layerName);
+                }
+            } catch (eReplacementTarget) {}
+            return false;
+        }
+
+        var prioritizePartReplacement = false;
+        for (var selIdx = 0; selIdx < selection.length; selIdx++) {
+            var selectedItem = selection[selIdx];
+            var selectedLayerName = null;
+            try { selectedLayerName = selectedItem && selectedItem.layer ? selectedItem.layer.name : null; } catch (eSelectedLayer) {}
+            if (isReplacementTargetItem(selectedItem, selectedLayerName)) {
+                prioritizePartReplacement = true;
+                break;
+            }
+        }
+        $.writeln("[MOVE] prioritizePartReplacement=" + (prioritizePartReplacement ? 1 : 0));
+
         // Helper function to find and remove existing anchors at a position from ALL ductwork parts layers
         // Returns the removed anchor's layer name if one was found and removed, null otherwise
         function removeExistingAnchorAtPosition(x, y, tolerance, excludeLayer) {
@@ -3055,9 +3080,16 @@ function MDUX_moveToLayerBridge(optionsJSON) {
 
             var isOnDuctworkParts = isValidDuctworkLayer(itemLayerName);
             var isOnIgnoreLayer = (itemLayerName === 'Ignore' || itemLayerName === 'Ignored');
+            var isReplacementTarget = isReplacementTargetItem(item, itemLayerName);
 
             // Accept items from ANY layer per user request
             $.writeln("[MOVE]   Item accepted from layer: " + itemLayerName);
+
+            if (prioritizePartReplacement && !isReplacementTarget) {
+                $.writeln("[MOVE]   Ignored non-part item during mixed-selection replacement");
+                moveLogLines.push("  Ignored in mixed-selection replacement mode");
+                continue;
+            }
 
             try {
                 moveLogLines.push("  Checking typename: " + item.typename);

@@ -48,8 +48,8 @@ namespace
 			return true;
 		}
 		if (name == "Green Ductwork") {
-			out.push_back(MakeStrokeSpec(4.0f, 0x11A600));
-			out.push_back(MakeStrokeSpec(8.0f, 0x00FF00));
+			out.push_back(MakeStrokeSpec(4.0f, 0x00B713));
+			out.push_back(MakeStrokeSpec(8.0f, 0x7EFE82));
 			return true;
 		}
 		if (name == "Orange Ductwork") {
@@ -58,8 +58,8 @@ namespace
 			return true;
 		}
 		if (name == "Light Green Ductwork") {
-			out.push_back(MakeStrokeSpec(4.0f, 0x11A600));
-			out.push_back(MakeStrokeSpec(8.0f, 0x00FF00));
+			out.push_back(MakeStrokeSpec(4.0f, 0x00B713));
+			out.push_back(MakeStrokeSpec(8.0f, 0x7EFE82));
 			return true;
 		}
 		if (name == "Light Orange Ductwork") {
@@ -137,6 +137,55 @@ namespace
 		sAIArtStyleParser->DisposeParser(parser);
 		return created;
 	}
+
+	bool RedefineNamedStyleFromSpecs(AIArtStyleHandle namedStyle, const std::vector<StrokeSpec>& strokes)
+	{
+		if (!sAIArtStyle || !sAIArtStyleParser || !namedStyle || strokes.empty()) {
+			return false;
+		}
+
+		AIArtStyleHandle baseStyle = nullptr;
+		if (sAIArtStyle->GetDefaultArtStyle(&baseStyle) || !baseStyle) {
+			return false;
+		}
+
+		AIStyleParser parser = nullptr;
+		if (sAIArtStyleParser->NewParser(&parser) || !parser) {
+			return false;
+		}
+
+		bool redefined = false;
+		if (sAIArtStyleParser->ParseStyle(parser, baseStyle) == kNoErr) {
+			for (ai::int32 i = sAIArtStyleParser->CountPaintFields(parser) - 1; i >= 0; --i) {
+				AIParserPaintField field = nullptr;
+				if (sAIArtStyleParser->GetNthPaintField(parser, i, &field) == kNoErr) {
+					sAIArtStyleParser->RemovePaintField(parser, field, true);
+				}
+			}
+
+			for (size_t i = 0; i < strokes.size(); ++i) {
+				AIStrokeStyle stroke;
+				stroke.Init();
+				stroke.color = strokes[i].color;
+				stroke.width = strokes[i].width;
+				stroke.overprint = false;
+
+				AIParserPaintField paintField = nullptr;
+				if (sAIArtStyleParser->NewPaintFieldStroke(&stroke, nullptr, &paintField) == kNoErr && paintField) {
+					sAIArtStyleParser->InsertNthPaintField(parser, sAIArtStyleParser->CountPaintFields(parser), paintField);
+				}
+			}
+
+			AIArtStyleHandle replacementStyle = nullptr;
+			if (sAIArtStyleParser->CreateNewStyle(parser, &replacementStyle) == kNoErr && replacementStyle &&
+				sAIArtStyle->RedefineNamedStyle(namedStyle, replacementStyle) == kNoErr) {
+				redefined = true;
+			}
+		}
+
+		sAIArtStyleParser->DisposeParser(parser);
+		return redefined;
+	}
 }
 
 DuctworkStyleStats DuctworkStyles::ApplyLineStyles(AIDocumentHandle document, const std::vector<DuctworkPath>& paths)
@@ -162,7 +211,11 @@ DuctworkStyleStats DuctworkStyles::ApplyLineStyles(AIDocumentHandle document, co
 			continue;
 		}
 		AIArtStyleHandle existing = nullptr;
-		if (!GetNamedStyle(document, it->first, existing)) {
+		if (GetNamedStyle(document, it->first, existing)) {
+			if (!RedefineNamedStyleFromSpecs(existing, strokes)) {
+				++stats.skippedNoSample;
+			}
+		} else {
 			if (CreateNamedStyleFromSpecs(document, it->first, strokes)) {
 			++stats.created;
 			} else {

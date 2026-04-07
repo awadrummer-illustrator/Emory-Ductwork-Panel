@@ -48,8 +48,11 @@ namespace DuctworkGeometry
 	EmoryBodyStats GenerateEmoryBodies(const std::vector<DuctworkPath>& paths);
 	bool ToggleSelectedEmoryConnectorStyles(std::string& outMessage);
 	bool ToggleSelectedEmoryTerminalSegmentStyle(std::string& outMessage);
+	bool SetSelectedEmoryTerminalSegmentStyle(const std::string& targetStyle, std::string& outMessage);
 	bool GetSelectedEmorySegmentState(std::string& outJson);
 	bool RevertSelectedEmoryToCenterlines(std::string& outMessage);
+	bool SelectSelectedEmoryCenterlines(std::string& outMessage);
+	bool PurgeSelectedEmoryState(std::string& outMessage);
 	bool SetSelectedEmoryTaperAlignment(const std::string& alignment, std::string& outMessage);
 	bool SetSelectedEmoryCenterlineVisibility(bool hidden, std::string& outMessage);
 	bool SetSelectedEmoryStartSegment(std::string& outMessage);

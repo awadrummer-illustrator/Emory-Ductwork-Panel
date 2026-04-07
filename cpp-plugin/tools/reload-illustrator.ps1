@@ -24,6 +24,35 @@ $pluginDestDir = "C:\Program Files\Adobe\Adobe Illustrator 2024\Plug-ins\Ductwor
 $testFile = "E:\Work\Work\Floorplans\Test Emory Ductwork.ai"
 $illustratorExe = "C:\Program Files\Adobe\Adobe Illustrator 2024\Support Files\Contents\Windows\Illustrator.exe"
 
+function Confirm-ReloadDeployment {
+	param(
+		[string]$Title,
+		[string]$Message
+	)
+
+	try {
+		$shell = New-Object -ComObject WScript.Shell
+		try {
+			$result = $shell.Popup($Message, 0, $Title, 4 + 32 + 4096)
+			return $result -eq 6
+		} finally {
+			if ($shell) {
+				[System.Runtime.Interopservices.Marshal]::ReleaseComObject($shell) | Out-Null
+			}
+		}
+	} catch {
+		$response = Read-Host "$Message [y/N]"
+		return $response -match '^(?i)y(es)?$'
+	}
+}
+
+if (-not (Confirm-ReloadDeployment `
+		-Title "Deploy Emory Ductwork" `
+		-Message "Deploy the rebuilt Emory Ductwork plugin and restart Illustrator?`n`nYes = deploy`nNo = cancel")) {
+	Write-Host "[Reload] Deployment canceled by user."
+	exit 0
+}
+
 function Get-LatestRecentIllustratorFile {
 	$recentDir = Join-Path $env:APPDATA "Microsoft\Windows\Recent"
 	if (!(Test-Path $recentDir)) {

@@ -29,6 +29,7 @@
 #include "AIFilePath.h"
 #include "AIAnnotator.h"
 #include "AIAnnotatorDrawer.h"
+#include "AICSXSExtension.h"
 
 extern "C" SPBlocksSuite* sSPBlocks;
 extern "C" AIMenuSuite* sAIMenu;
@@ -57,6 +58,7 @@ extern "C" AIFileFormatSuite* sAIFileFormat;
 extern "C" AIFilePathSuite* sAIFilePath;
 extern "C" AIAnnotatorSuite* sAIAnnotator;
 extern "C" AIAnnotatorDrawerSuite* sAIAnnotatorDrawer;
+extern "C" AICSXSExtensionSuite* sAICSXSExtension;
 
 #endif // __ProcessDuctworkSUITES_H__
 

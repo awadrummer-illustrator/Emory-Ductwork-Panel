@@ -71,8 +71,10 @@ namespace
 	const char* const kEmoryCornerStylesKey = "MDUX_EmoryCornerStyles";
 	const char* const kEmoryTerminalStartStyleKey = "MDUX_EmoryTerminalStartStyle";
 	const char* const kEmoryTerminalEndStyleKey = "MDUX_EmoryTerminalEndStyle";
+	// Stored metadata value for generated Emory ductwork body art. Keep the literal stable for existing documents.
 	const char* const kEmoryRoleSegment = "segment";
 	const char* const kEmoryRoleConnector = "connector";
+	// Stored metadata value for generated Emory wire art: the visible line left when a final has no ductwork body.
 	const char* const kEmoryRoleGuide = "guide";
 	const char* const kEmoryRoleCenterline = "centerline";
 	const char* const kEmoryRoleRunGroup = "run-group";
@@ -82,6 +84,23 @@ namespace
 	const char* const kEmorySourceIdPrefix = "MD:EMORY_SOURCE_ID=";
 
 	void ReadOmittedSegmentIndices(AIArtHandle art, std::set<size_t>& outIndices);
+
+	std::string DescribeEmoryGeneratedArtRole(const std::string& role)
+	{
+		if (role == kEmoryRoleSegment) {
+			return "ductwork-body";
+		}
+		if (role == kEmoryRoleGuide) {
+			return "wire";
+		}
+		if (role == kEmoryRoleConnector) {
+			return "end-connector";
+		}
+		if (role == kEmoryRoleCenterline) {
+			return "centerline";
+		}
+		return role;
+	}
 
 	struct Vec2
 	{
@@ -286,8 +305,8 @@ namespace
 			return spec;
 		}
 
-		spec.fill = MakeRGBColor(17, 166, 0);
-		spec.stroke = MakeRGBColor(0, 255, 0);
+		spec.fill = MakeRGBColor(126, 254, 130);
+		spec.stroke = MakeRGBColor(0, 183, 19);
 		return spec;
 	}
 
@@ -918,6 +937,34 @@ namespace
 		return true;
 	}
 
+	bool SetClosedPathPoints(AIArtHandle art, const std::vector<DuctworkPoint>& points)
+	{
+		if (!art || !sAIPath || !sAIArt || points.size() < 3) {
+			return false;
+		}
+
+		const ai::int16 count = static_cast<ai::int16>(points.size());
+		if (sAIPath->SetPathSegmentCount(art, count) != kNoErr) {
+			return false;
+		}
+
+		std::vector<AIPathSegment> segments(static_cast<size_t>(count));
+		for (ai::int16 i = 0; i < count; ++i) {
+			segments[static_cast<size_t>(i)].p.h = static_cast<AIReal>(points[static_cast<size_t>(i)].x);
+			segments[static_cast<size_t>(i)].p.v = static_cast<AIReal>(points[static_cast<size_t>(i)].y);
+			segments[static_cast<size_t>(i)].in = segments[static_cast<size_t>(i)].p;
+			segments[static_cast<size_t>(i)].out = segments[static_cast<size_t>(i)].p;
+			segments[static_cast<size_t>(i)].corner = true;
+		}
+
+		if (sAIPath->SetPathSegments(art, 0, count, &segments[0]) != kNoErr) {
+			return false;
+		}
+
+		sAIPath->SetPathClosed(art, true);
+		return true;
+	}
+
 	std::string SerializeCenterlinePoints(const std::vector<DuctworkPoint>& points)
 	{
 		if (points.size() < 2) {
@@ -1364,6 +1411,44 @@ namespace
 		return !outFragments.empty();
 	}
 
+	void BuildRevertCenterlineIndex(std::map<std::string, std::vector<AIArtHandle> >& outBackupsBySourceId,
+		std::map<std::string, std::vector<EmorySourceIdCandidate> >& outFragmentsBySourceId)
+	{
+		outBackupsBySourceId.clear();
+		outFragmentsBySourceId.clear();
+
+		std::vector<AIArtHandle> allPaths;
+		CollectAllLineLayerPaths(allPaths);
+		for (size_t i = 0; i < allPaths.size(); ++i) {
+			AIArtHandle art = allPaths[i];
+			if (!art || IsGeneratedEmoryArtInternal(art)) {
+				continue;
+			}
+
+			std::string sourceId;
+			if (!DuctworkMetadata::GetString(art, kEmorySourceIdKey, sourceId) || sourceId.empty()) {
+				sourceId = ReadEmorySourceIdFromNote(art);
+			}
+			if (sourceId.empty()) {
+				continue;
+			}
+
+			if (IsBackupCenterlineArt(art)) {
+				outBackupsBySourceId[sourceId].push_back(art);
+				continue;
+			}
+
+			EmorySourceIdCandidate fragment;
+			fragment.art = art;
+			fragment.oldSourceId = sourceId;
+			if (!BuildProcessPathForArt(art, fragment.path) ||
+				!DuctworkGeometry::IsCenterlineCandidate(fragment.path.art, fragment.path.points, fragment.path.closed, fragment.path.layerName)) {
+				continue;
+			}
+			outFragmentsBySourceId[sourceId].push_back(fragment);
+		}
+	}
+
 	bool FindBestRevertGapMergeCandidate(const std::vector<EmorySourceIdCandidate>& fragments,
 		RevertGapMergeCandidate& outCandidate)
 	{
@@ -1455,13 +1540,11 @@ namespace
 		return true;
 	}
 
-	bool HealSourceCenterlineFragmentsForSourceId(const std::string& sourceId,
+	bool HealSourceCenterlineFragments(std::vector<EmorySourceIdCandidate>& fragments,
 		std::vector<AIArtHandle>& outSourceArts)
 	{
 		outSourceArts.clear();
-
-		std::vector<EmorySourceIdCandidate> fragments;
-		if (!CollectSourceCenterlineFragmentsForSourceId(sourceId, fragments)) {
+		if (fragments.empty()) {
 			return false;
 		}
 
@@ -1480,13 +1563,22 @@ namespace
 		return !outSourceArts.empty();
 	}
 
-	bool RestoreStoredOriginalCenterlineForSourceId(const std::string& sourceId,
+	bool HealSourceCenterlineFragmentsForSourceId(const std::string& sourceId,
+		std::vector<AIArtHandle>& outSourceArts)
+	{
+		std::vector<EmorySourceIdCandidate> fragments;
+		if (!CollectSourceCenterlineFragmentsForSourceId(sourceId, fragments)) {
+			outSourceArts.clear();
+			return false;
+		}
+		return HealSourceCenterlineFragments(fragments, outSourceArts);
+	}
+
+	bool RestoreStoredOriginalCenterlineFragments(const std::vector<EmorySourceIdCandidate>& fragments,
 		std::vector<AIArtHandle>& outSourceArts)
 	{
 		outSourceArts.clear();
-
-		std::vector<EmorySourceIdCandidate> fragments;
-		if (!CollectSourceCenterlineFragmentsForSourceId(sourceId, fragments) || fragments.empty()) {
+		if (fragments.empty()) {
 			return false;
 		}
 
@@ -1548,18 +1640,25 @@ namespace
 		return true;
 	}
 
-	bool RestoreBackupCenterlinesForSourceId(const std::string& sourceId,
+	bool RestoreStoredOriginalCenterlineForSourceId(const std::string& sourceId,
+		std::vector<AIArtHandle>& outSourceArts)
+	{
+		std::vector<EmorySourceIdCandidate> fragments;
+		if (!CollectSourceCenterlineFragmentsForSourceId(sourceId, fragments)) {
+			outSourceArts.clear();
+			return false;
+		}
+		return RestoreStoredOriginalCenterlineFragments(fragments, outSourceArts);
+	}
+
+	bool RestoreBackupCenterlinesFromFragments(const std::vector<AIArtHandle>& backups,
+		const std::vector<EmorySourceIdCandidate>& workingFragments,
 		std::vector<AIArtHandle>& outSourceArts)
 	{
 		outSourceArts.clear();
-
-		std::vector<AIArtHandle> backups;
-		if (!CollectBackupCenterlinesForSourceId(sourceId, backups) || backups.empty()) {
+		if (backups.empty()) {
 			return false;
 		}
-
-		std::vector<EmorySourceIdCandidate> workingFragments;
-		CollectSourceCenterlineFragmentsForSourceId(sourceId, workingFragments);
 
 		AIArtHandle keeperBackup = nullptr;
 		size_t keeperPointCount = 0;
@@ -1610,20 +1709,21 @@ namespace
 			sAIArt->DisposeArt(art);
 		}
 
-		std::vector<EmorySourceIdCandidate> remainingFragments;
-		if (CollectSourceCenterlineFragmentsForSourceId(sourceId, remainingFragments)) {
-			for (size_t i = 0; i < remainingFragments.size(); ++i) {
-				AIArtHandle art = remainingFragments[i].art;
-				if (!art || art == keeperBackup) {
-					continue;
-				}
-				ClearStoredOriginalCenterlinePoints(art);
-				sAIArt->SetArtUserAttr(art, kArtLocked | kArtHidden, 0);
-				sAIArt->DisposeArt(art);
-			}
+		return !outSourceArts.empty();
+	}
+
+	bool RestoreBackupCenterlinesForSourceId(const std::string& sourceId,
+		std::vector<AIArtHandle>& outSourceArts)
+	{
+		std::vector<AIArtHandle> backups;
+		if (!CollectBackupCenterlinesForSourceId(sourceId, backups) || backups.empty()) {
+			outSourceArts.clear();
+			return false;
 		}
 
-		return !outSourceArts.empty();
+		std::vector<EmorySourceIdCandidate> workingFragments;
+		CollectSourceCenterlineFragmentsForSourceId(sourceId, workingFragments);
+		return RestoreBackupCenterlinesFromFragments(backups, workingFragments, outSourceArts);
 	}
 
 	bool HealCenterlineFragmentArtSet(std::vector<AIArtHandle>& ioSourceArts)
@@ -1820,6 +1920,32 @@ namespace
 						CollectAllPathsFromArt(layerGroup, outPaths);
 					}
 				}
+			}
+
+			AILayerHandle next = nullptr;
+			if (sAILayer->GetNextLayer(layer, &next) != kNoErr) {
+				break;
+			}
+			layer = next;
+		}
+	}
+
+	void CollectAllDocumentPaths(std::vector<AIArtHandle>& outPaths)
+	{
+		outPaths.clear();
+		if (!sAILayer || !sAIArt) {
+			return;
+		}
+
+		AILayerHandle layer = nullptr;
+		if (sAILayer->GetFirstLayer(&layer) != kNoErr) {
+			return;
+		}
+
+		while (layer) {
+			AIArtHandle layerGroup = nullptr;
+			if (sAIArt->GetFirstArtOfLayer(layer, &layerGroup) == kNoErr && layerGroup) {
+				CollectAllPathsFromArt(layerGroup, outPaths);
 			}
 
 			AILayerHandle next = nullptr;
@@ -2101,6 +2227,11 @@ namespace
 		DuctworkNotes::RemoveToken(tokens, kEmoryGeneratedToken);
 		DuctworkNotes::RemoveToken(tokens, kEmoryCenterlineToken);
 		DuctworkNotes::RemoveToken(tokens, kEmoryBodyToken);
+		tokens.erase(std::remove_if(tokens.begin(), tokens.end(),
+			[](const std::string& token) {
+				return token.find(kEmorySourceIdPrefix) == 0;
+			}),
+			tokens.end());
 		if (role == kEmoryRoleCenterline) {
 			DuctworkNotes::AddToken(tokens, kEmoryCenterlineToken);
 		} else if (IsGeneratedRole(role)) {
@@ -2111,6 +2242,41 @@ namespace
 			UpsertNoteToken(tokens, kEmorySourceIdPrefix, sourceId);
 		}
 		WriteNoteTokens(art, tokens);
+	}
+
+	void ClearAllEmoryMetadataInternal(AIArtHandle art)
+	{
+		if (!art) {
+			return;
+		}
+
+		DuctworkMetadata::RemoveKey(art, kEmoryRoleKey);
+		DuctworkMetadata::RemoveKey(art, kEmorySourceIdKey);
+		DuctworkMetadata::RemoveKey(art, kEmoryLinkedSourceIdsKey);
+		DuctworkMetadata::RemoveKey(art, kEmoryBodyWidthKey);
+		DuctworkMetadata::RemoveKey(art, kEmorySourceBodyWidthKey);
+		DuctworkMetadata::RemoveKey(art, kEmorySourceStrokeWidthKey);
+		DuctworkMetadata::RemoveKey(art, kEmorySourceStrokeExplicitKey);
+		DuctworkMetadata::RemoveKey(art, kEmoryOriginalPathPointsKey);
+		DuctworkMetadata::RemoveKey(art, kEmorySegmentWidthsKey);
+		DuctworkMetadata::RemoveKey(art, kEmoryStartSegmentIndexKey);
+		DuctworkMetadata::RemoveKey(art, kEmoryTaperAlignmentsKey);
+		DuctworkMetadata::RemoveKey(art, kEmoryCenterlinesHiddenKey);
+		DuctworkMetadata::RemoveKey(art, kEmoryBackupCenterlineKey);
+		DuctworkMetadata::RemoveKey(art, kEmoryOmitStartSegmentThicknessKey);
+		DuctworkMetadata::RemoveKey(art, kEmoryOmitEndSegmentThicknessKey);
+		DuctworkMetadata::RemoveKey(art, kEmoryOmittedSegmentIndicesKey);
+		DuctworkMetadata::RemoveKey(art, kEmorySegmentIndexKey);
+		DuctworkMetadata::RemoveKey(art, kEmoryJointIndexKey);
+		DuctworkMetadata::RemoveKey(art, kEmoryConnectorStyleKey);
+		DuctworkMetadata::RemoveKey(art, kEmoryCornerStylesKey);
+		DuctworkMetadata::RemoveKey(art, kEmoryTerminalStartStyleKey);
+		DuctworkMetadata::RemoveKey(art, kEmoryTerminalEndStyleKey);
+		UpdateEmoryTokens(art, std::string(), std::string());
+
+		if (sAIArt) {
+			sAIArt->SetArtUserAttr(art, kArtHidden, 0);
+		}
 	}
 
 	std::string ReadEmorySourceIdFromNote(AIArtHandle art)
@@ -2633,9 +2799,6 @@ namespace
 		size_t sourceSegmentIndex,
 		const std::string& style)
 	{
-		if (style != "curved") {
-			return true;
-		}
 		if (!guideArt || sourcePoints.size() < 2 || sourceSegmentIndex + 1 >= sourcePoints.size() || !sAIPath) {
 			return false;
 		}
@@ -2650,45 +2813,320 @@ namespace
 			return false;
 		}
 
-		const DuctworkPoint startPoint = sourcePoints[sourceSegmentIndex];
-		const DuctworkPoint endPoint = sourcePoints[sourceSegmentIndex + 1];
-		double handleLength = std::hypot(endPoint.x - startPoint.x, endPoint.y - startPoint.y) * 0.33;
-		if (handleLength < 0.01) {
-			handleLength = 0.0;
+		segments[0].in = segments[0].p;
+		segments[0].out = segments[0].p;
+		segments[1].in = segments[1].p;
+		segments[1].out = segments[1].p;
+		segments[0].corner = true;
+		segments[1].corner = true;
+
+		if (style != "curved") {
+			return sAIPath->SetPathSegments(guideArt, 0, segmentCount, &segments[0]) == kNoErr;
 		}
 
-		segments[0].in = segments[0].p;
-		segments[1].out = segments[1].p;
+	const DuctworkPoint startPoint = sourcePoints[sourceSegmentIndex];
+	const DuctworkPoint endPoint = sourcePoints[sourceSegmentIndex + 1];
+	double handleLength = std::hypot(endPoint.x - startPoint.x, endPoint.y - startPoint.y) * 0.33;
+	if (handleLength < 0.01) {
+		handleLength = 0.0;
+	}
+	Vec2 segmentDir;
+	Vec2 segmentNormal;
+	const bool hasSegmentDirection = BuildUnitDirection(startPoint, endPoint, segmentDir, segmentNormal);
 
-		if (sourceSegmentIndex == 0) {
-			Vec2 nextDir;
-			Vec2 nextNormal;
-			if (!BuildUnitDirection(sourcePoints[1],
+	segments[0].in = segments[0].p;
+	segments[1].out = segments[1].p;
+
+	if (sourceSegmentIndex == 0) {
+		Vec2 nextDir;
+		Vec2 nextNormal;
+		const bool hasNextDirection = BuildUnitDirection(sourcePoints[1],
 				sourcePoints.size() > 2 ? sourcePoints[2] : sourcePoints[1],
 				nextDir,
-				nextNormal)) {
-				BuildUnitDirection(sourcePoints[0], sourcePoints[1], nextDir, nextNormal);
-			}
-			segments[0].out = segments[0].p;
+				nextNormal);
+		if (!hasNextDirection) {
+			BuildUnitDirection(sourcePoints[0], sourcePoints[1], nextDir, nextNormal);
+		}
+		segments[0].out = segments[0].p;
+		const bool needsOffAxisCurve = !hasNextDirection ||
+			(hasSegmentDirection && Dot(segmentDir, nextDir) > 0.85 && std::fabs(Cross(segmentDir, nextDir)) < 0.15);
+		if (needsOffAxisCurve && hasSegmentDirection) {
+			const double axialHandle = handleLength * 0.6;
+			const double lateralHandle = handleLength * 0.8;
+			const DuctworkPoint startOut = Add(startPoint, segmentDir, axialHandle);
+			const DuctworkPoint endIn = Add(endPoint, Scale(segmentDir, -1.0), axialHandle);
+			const DuctworkPoint startOutOffset = Add(startOut, segmentNormal, lateralHandle);
+			const DuctworkPoint endInOffset = Add(endIn, segmentNormal, lateralHandle);
+			segments[0].out.h = static_cast<AIReal>(startOutOffset.x);
+			segments[0].out.v = static_cast<AIReal>(startOutOffset.y);
+			segments[1].in.h = static_cast<AIReal>(endInOffset.x);
+			segments[1].in.v = static_cast<AIReal>(endInOffset.y);
+		} else {
 			segments[1].in.h = static_cast<AIReal>(segments[1].p.h - nextDir.x * handleLength);
 			segments[1].in.v = static_cast<AIReal>(segments[1].p.v - nextDir.y * handleLength);
-		} else {
-			Vec2 prevDir;
-			Vec2 prevNormal;
-			if (!BuildUnitDirection(sourceSegmentIndex > 0 ? sourcePoints[sourceSegmentIndex - 1] : sourcePoints[sourceSegmentIndex],
+		}
+	} else {
+		Vec2 prevDir;
+		Vec2 prevNormal;
+		const bool hasPrevDirection = BuildUnitDirection(sourceSegmentIndex > 0 ? sourcePoints[sourceSegmentIndex - 1] : sourcePoints[sourceSegmentIndex],
 				sourcePoints[sourceSegmentIndex],
 				prevDir,
-				prevNormal)) {
-				BuildUnitDirection(sourcePoints[sourceSegmentIndex], sourcePoints[sourceSegmentIndex + 1], prevDir, prevNormal);
-			}
+				prevNormal);
+		if (!hasPrevDirection) {
+			BuildUnitDirection(sourcePoints[sourceSegmentIndex], sourcePoints[sourceSegmentIndex + 1], prevDir, prevNormal);
+		}
+		const bool needsOffAxisCurve = !hasPrevDirection ||
+			(hasSegmentDirection && Dot(segmentDir, prevDir) > 0.85 && std::fabs(Cross(segmentDir, prevDir)) < 0.15);
+		if (needsOffAxisCurve && hasSegmentDirection) {
+			const double axialHandle = handleLength * 0.6;
+			const double lateralHandle = handleLength * 0.8;
+			const DuctworkPoint startOut = Add(startPoint, segmentDir, axialHandle);
+			const DuctworkPoint endIn = Add(endPoint, Scale(segmentDir, -1.0), axialHandle);
+			const DuctworkPoint startOutOffset = Add(startOut, segmentNormal, lateralHandle);
+			const DuctworkPoint endInOffset = Add(endIn, segmentNormal, lateralHandle);
+			segments[0].out.h = static_cast<AIReal>(startOutOffset.x);
+			segments[0].out.v = static_cast<AIReal>(startOutOffset.y);
+			segments[1].in.h = static_cast<AIReal>(endInOffset.x);
+			segments[1].in.v = static_cast<AIReal>(endInOffset.y);
+		} else {
 			segments[0].out.h = static_cast<AIReal>(segments[0].p.h + prevDir.x * handleLength);
 			segments[0].out.v = static_cast<AIReal>(segments[0].p.v + prevDir.y * handleLength);
-			segments[1].in = segments[1].p;
 		}
+		segments[1].in = segments[1].p;
+	}
 
 		segments[0].corner = false;
 		segments[1].corner = false;
 		return sAIPath->SetPathSegments(guideArt, 0, segmentCount, &segments[0]) == kNoErr;
+	}
+
+	bool ResolveTerminalCurveControlPoints(const std::vector<DuctworkPoint>& sourcePoints,
+		size_t sourceSegmentIndex,
+		const std::string& style,
+		DuctworkPoint& outP0,
+		DuctworkPoint& outP1,
+		DuctworkPoint& outP2,
+		DuctworkPoint& outP3)
+	{
+		if (sourcePoints.size() < 2 || sourceSegmentIndex + 1 >= sourcePoints.size()) {
+			return false;
+		}
+
+		outP0 = sourcePoints[sourceSegmentIndex];
+		outP1 = outP0;
+		outP2 = sourcePoints[sourceSegmentIndex + 1];
+		outP3 = outP2;
+
+		if (style != "curved") {
+			return true;
+		}
+
+		double handleLength = std::hypot(outP3.x - outP0.x, outP3.y - outP0.y) * 0.33;
+		if (handleLength < 0.01) {
+			handleLength = 0.0;
+		}
+		if (handleLength <= 0.0) {
+			return true;
+		}
+
+		Vec2 segmentDir;
+		Vec2 segmentNormal;
+		const bool hasSegmentDirection = BuildUnitDirection(outP0, outP3, segmentDir, segmentNormal);
+
+		if (sourceSegmentIndex == 0) {
+			Vec2 nextDir;
+			Vec2 nextNormal;
+			const bool hasNextDirection = BuildUnitDirection(sourcePoints[1],
+				sourcePoints.size() > 2 ? sourcePoints[2] : sourcePoints[1],
+				nextDir,
+				nextNormal);
+			if (!hasNextDirection) {
+				BuildUnitDirection(sourcePoints[0], sourcePoints[1], nextDir, nextNormal);
+			}
+
+			const bool needsOffAxisCurve = !hasNextDirection ||
+				(hasSegmentDirection && Dot(segmentDir, nextDir) > 0.85 && std::fabs(Cross(segmentDir, nextDir)) < 0.15);
+			if (needsOffAxisCurve && hasSegmentDirection) {
+				const double axialHandle = handleLength * 0.6;
+				const double lateralHandle = handleLength * 0.8;
+				const DuctworkPoint startOut = Add(outP0, segmentDir, axialHandle);
+				const DuctworkPoint endIn = Add(outP3, Scale(segmentDir, -1.0), axialHandle);
+				outP1 = Add(startOut, segmentNormal, lateralHandle);
+				outP2 = Add(endIn, segmentNormal, lateralHandle);
+			} else {
+				outP2 = Add(outP3, Scale(nextDir, -1.0), handleLength);
+			}
+			return true;
+		}
+
+		Vec2 prevDir;
+		Vec2 prevNormal;
+		const bool hasPrevDirection = BuildUnitDirection(sourceSegmentIndex > 0 ? sourcePoints[sourceSegmentIndex - 1] : sourcePoints[sourceSegmentIndex],
+			sourcePoints[sourceSegmentIndex],
+			prevDir,
+			prevNormal);
+		if (!hasPrevDirection) {
+			BuildUnitDirection(sourcePoints[sourceSegmentIndex], sourcePoints[sourceSegmentIndex + 1], prevDir, prevNormal);
+		}
+		const bool needsOffAxisCurve = !hasPrevDirection ||
+			(hasSegmentDirection && Dot(segmentDir, prevDir) > 0.85 && std::fabs(Cross(segmentDir, prevDir)) < 0.15);
+		if (needsOffAxisCurve && hasSegmentDirection) {
+			const double axialHandle = handleLength * 0.6;
+			const double lateralHandle = handleLength * 0.8;
+			const DuctworkPoint startOut = Add(outP0, segmentDir, axialHandle);
+			const DuctworkPoint endIn = Add(outP3, Scale(segmentDir, -1.0), axialHandle);
+			outP1 = Add(startOut, segmentNormal, lateralHandle);
+			outP2 = Add(endIn, segmentNormal, lateralHandle);
+		} else {
+			outP1 = Add(outP0, prevDir, handleLength);
+		}
+		return true;
+	}
+
+	bool BuildTerminalBodyPolygon(const std::vector<DuctworkPoint>& sourcePoints,
+		size_t sourceSegmentIndex,
+		double fullWidth,
+		double referenceWidth,
+		const std::string& alignment,
+		bool chainHorizontal,
+		bool chainVertical,
+		const std::string& style,
+		std::vector<DuctworkPoint>& outPolygon)
+	{
+		outPolygon.clear();
+		if (sourcePoints.size() < 2 || sourceSegmentIndex + 1 >= sourcePoints.size()) {
+			return false;
+		}
+
+		if (style != "curved") {
+			return BuildAlignedBandPolygon(sourcePoints[sourceSegmentIndex],
+				sourcePoints[sourceSegmentIndex + 1],
+				fullWidth,
+				referenceWidth,
+				alignment,
+				chainHorizontal,
+				chainVertical,
+				outPolygon);
+		}
+
+		DuctworkPoint p0;
+		DuctworkPoint p1;
+		DuctworkPoint p2;
+		DuctworkPoint p3;
+		if (!ResolveTerminalCurveControlPoints(sourcePoints, sourceSegmentIndex, style, p0, p1, p2, p3)) {
+			return false;
+		}
+
+		const int sampleCount = 12;
+		std::vector<DuctworkPoint> primarySide;
+		std::vector<DuctworkPoint> secondarySide;
+		primarySide.reserve(static_cast<size_t>(sampleCount) + 1);
+		secondarySide.reserve(static_cast<size_t>(sampleCount) + 1);
+
+		Vec2 fallbackDir;
+		Vec2 fallbackNormal;
+		if (!BuildUnitDirection(p0, p3, fallbackDir, fallbackNormal)) {
+			return false;
+		}
+
+		for (int sampleIndex = 0; sampleIndex <= sampleCount; ++sampleIndex) {
+			const double t = static_cast<double>(sampleIndex) / static_cast<double>(sampleCount);
+			const DuctworkPoint center = EvaluateCubicBezier(p0, p1, p2, p3, t);
+			Vec2 tangent = EvaluateCubicBezierTangent(p0, p1, p2, p3, t);
+			Vec2 dir;
+			if (!Normalize(tangent, dir)) {
+				dir = fallbackDir;
+			}
+			Vec2 normal = PerpCCW(dir);
+
+			double primaryOffset = 0.0;
+			double secondaryOffset = 0.0;
+			ResolveAlignedOffsets(dir,
+				fullWidth,
+				referenceWidth,
+				alignment,
+				chainHorizontal,
+				chainVertical,
+				primaryOffset,
+				secondaryOffset);
+
+			primarySide.push_back(Add(center, normal, primaryOffset));
+			secondarySide.push_back(Add(center, normal, secondaryOffset));
+		}
+
+		for (size_t i = 0; i < primarySide.size(); ++i) {
+			AppendIfDistinct(outPolygon, primarySide[i]);
+		}
+		for (size_t i = secondarySide.size(); i > 0; --i) {
+			AppendIfDistinct(outPolygon, secondarySide[i - 1]);
+		}
+		return outPolygon.size() >= 4;
+	}
+
+	bool ApplyTerminalBodyStyleToSegmentArt(AIArtHandle segmentArt,
+		const std::vector<DuctworkPoint>& sourcePoints,
+		size_t sourceSegmentIndex,
+		double fullWidth,
+		double referenceWidth,
+		const std::string& alignment,
+		bool chainHorizontal,
+		bool chainVertical,
+		const std::string& style)
+	{
+		std::vector<DuctworkPoint> polygon;
+		if (!BuildTerminalBodyPolygon(sourcePoints,
+				sourceSegmentIndex,
+				fullWidth,
+				referenceWidth,
+				alignment,
+				chainHorizontal,
+				chainVertical,
+				style,
+				polygon)) {
+			return false;
+		}
+
+		return SetClosedPathPoints(segmentArt, polygon);
+	}
+
+	bool GuidePointsMatchTerminalSegment(const std::vector<DuctworkPoint>& guidePoints,
+		const std::vector<DuctworkPoint>& sourcePoints,
+		int sourceSegmentIndex,
+		double tolerance)
+	{
+		if (guidePoints.size() < 2 ||
+			sourcePoints.size() < 2 ||
+			sourceSegmentIndex < 0 ||
+			sourceSegmentIndex + 1 >= static_cast<int>(sourcePoints.size())) {
+			return false;
+		}
+
+		const DuctworkPoint& sourceStart = sourcePoints[static_cast<size_t>(sourceSegmentIndex)];
+		const DuctworkPoint& sourceEnd = sourcePoints[static_cast<size_t>(sourceSegmentIndex + 1)];
+		const auto closeEnough = [tolerance](const DuctworkPoint& a, const DuctworkPoint& b) {
+			return std::hypot(a.x - b.x, a.y - b.y) <= tolerance;
+		};
+
+		return (closeEnough(guidePoints[0], sourceStart) && closeEnough(guidePoints[1], sourceEnd)) ||
+			(closeEnough(guidePoints[0], sourceEnd) && closeEnough(guidePoints[1], sourceStart));
+	}
+
+	bool PathSegmentMatchesReference(const std::vector<DuctworkPoint>& pathPoints,
+		int pathSegmentIndex,
+		const std::vector<DuctworkPoint>& sourcePoints,
+		int sourceSegmentIndex,
+		double tolerance)
+	{
+		if (pathPoints.size() < 2 ||
+			pathSegmentIndex < 0 ||
+			pathSegmentIndex + 1 >= static_cast<int>(pathPoints.size())) {
+			return false;
+		}
+
+		std::vector<DuctworkPoint> segmentPoints;
+		segmentPoints.push_back(pathPoints[static_cast<size_t>(pathSegmentIndex)]);
+		segmentPoints.push_back(pathPoints[static_cast<size_t>(pathSegmentIndex + 1)]);
+		return GuidePointsMatchTerminalSegment(segmentPoints, sourcePoints, sourceSegmentIndex, tolerance);
 	}
 
 	std::string MakeTaperChainKey(int startSegmentIndex, int endSegmentIndex)
@@ -4566,9 +5004,26 @@ void ClearStartSegmentIndex(AIArtHandle sourceArt)
 			if (groupIt->second.size() <= 1) {
 				continue;
 			}
+
 			std::vector<AIArtHandle> backups;
-			if (CollectBackupCenterlinesForSourceId(groupIt->first, backups) && backups.size() == 1) {
-				continue;
+			if (CollectBackupCenterlinesForSourceId(groupIt->first, backups) && backups.size() == 1 && backups[0]) {
+				DuctworkPath backupPath;
+				std::string backupSignature;
+				if (BuildProcessPathForArt(backups[0], backupPath) &&
+					GetOriginalCenterlineSignature(backups[0], &backupPath, backupSignature) &&
+					!backupSignature.empty()) {
+					for (size_t candidateIndex = 0; candidateIndex < groupIt->second.size(); ++candidateIndex) {
+						EmorySourceIdCandidate& candidate = groupIt->second[candidateIndex];
+						std::string candidateSignature;
+						if (GetOriginalCenterlineSignature(candidate.art, &candidate.path, candidateSignature) &&
+							candidateSignature == backupSignature) {
+							continue;
+						}
+						candidate.newSourceId = GenerateSourceId();
+						anyReassigned = true;
+					}
+					continue;
+				}
 			}
 
 			for (size_t candidateIndex = 1; candidateIndex < groupIt->second.size(); ++candidateIndex) {
@@ -5797,6 +6252,13 @@ void ClearStartSegmentIndex(AIArtHandle sourceArt)
 			}
 		}
 		return false;
+	}
+
+	bool AllowDistributionTrunkTerminalRegister(size_t pointCount,
+		bool distributionTrunk,
+		bool registerAtEndpoint)
+	{
+		return distributionTrunk && pointCount >= 3 && registerAtEndpoint;
 	}
 
 	void ApplySelectedWidthToPathState(EmorySourceState& state, const std::vector<int>& selectedSegmentIndices, double newWidth)
@@ -7419,10 +7881,14 @@ bool BuildRoundCornerPolygon(const ConnectorSpec& connector, const CornerPairing
 				++stats.created;
 			};
 
-			if (omitStartSegmentThickness) {
+			const bool effectiveOmitStart = effectiveOmittedSegments.find(0) != effectiveOmittedSegments.end();
+			const bool effectiveOmitEnd = segmentCount > 0 &&
+				effectiveOmittedSegments.find(segmentCount - 1) != effectiveOmittedSegments.end();
+
+			if (effectiveOmitStart) {
 				createOmittedGuide(0, omitStartTerminalStyle);
 			}
-			if (omitEndSegmentThickness && segmentCount > 0) {
+			if (effectiveOmitEnd && segmentCount > 0) {
 				createOmittedGuide(segmentCount - 1, omitEndTerminalStyle);
 			}
 		}
@@ -7500,7 +7966,11 @@ bool DuctworkGeometry::IsCenterlineCandidate(AIArtHandle art,
 	if (!art || closed || points.size() < 2) {
 		return false;
 	}
-	if (!DuctworkLayers::IsLineLayerName(layerName)) {
+	// Emory source centerlines are only the ductwork color layers.
+	// Thermostat lines share the broader line-layer bucket but should
+	// never participate in centerline hide/show, revert, or source-id
+	// collection for Emory duct runs.
+	if (!DuctworkLayers::IsColorLayerName(layerName)) {
 		return false;
 	}
 	if (IsGeneratedEmoryArtInternal(art)) {
@@ -7943,9 +8413,21 @@ void DuctworkGeometry::UpdateSelectedEmoryFinalSegmentThicknessMetadata(const st
 				if (sourceActsAsTrunkConnection || sourceHasSegmentIntersection) {
 					omittedSegmentIndices.clear();
 					const bool preserveStartTerminal =
-						omitStart && registerAtStart && (unitAtEnd || rectangularRegisterAtStart);
+						(omitStart && registerAtStart && (unitAtEnd || rectangularRegisterAtStart)) ||
+						(omitStart &&
+							AllowDistributionTrunkTerminalRegister(sourcePoints.size(),
+								sourceActsAsTrunkConnection,
+								registerAtStart) &&
+							!unitAtStart &&
+							!unitAtEnd);
 					const bool preserveEndTerminal =
-						omitEnd && registerAtEnd && (unitAtStart || rectangularRegisterAtEnd);
+						(omitEnd && registerAtEnd && (unitAtStart || rectangularRegisterAtEnd)) ||
+						(omitEnd &&
+							AllowDistributionTrunkTerminalRegister(sourcePoints.size(),
+								sourceActsAsTrunkConnection,
+								registerAtEnd) &&
+							!unitAtStart &&
+							!unitAtEnd);
 					omitStart = preserveStartTerminal;
 					omitEnd = preserveEndTerminal;
 					if (omitStart) {
@@ -8246,9 +8728,11 @@ bool DuctworkGeometry::ToggleSelectedEmoryConnectorStyles(std::string& outMessag
 	return true;
 }
 
-bool DuctworkGeometry::ToggleSelectedEmoryTerminalSegmentStyle(std::string& outMessage)
+bool ApplySelectedEmoryTerminalSegmentStyleInternal(const std::string& requestedStyle,
+	bool useRequestedStyle,
+	std::string& outMessage)
 {
-	outMessage = "Select one or more Emory final tails, guides, or end connectors first.";
+	outMessage = "Select one or more Emory visible final guides, terminal segments, or end connectors first.";
 	if (!sAIArt) {
 		outMessage = "Illustrator SDK is not available.";
 		return false;
@@ -8276,9 +8760,21 @@ bool DuctworkGeometry::ToggleSelectedEmoryTerminalSegmentStyle(std::string& outM
 		std::string sourceId;
 		AIArtHandle sourceArt = nullptr;
 		DuctworkPath sourcePath;
+		std::vector<DuctworkPoint> sourcePoints;
 		AIArtHandle canonicalArt = nullptr;
 		std::vector<DuctworkPoint> canonicalPoints;
+		int sourceTerminalSegmentIndex = -1;
 		bool atStart = false;
+		bool omittedTerminal = false;
+		bool resolvedFromBackupOnly = false;
+	};
+
+	struct GeneratedGuideCandidate
+	{
+		AIArtHandle art = nullptr;
+		std::string sourceId;
+		int segmentIndex = -1;
+		std::vector<DuctworkPoint> points;
 	};
 
 	std::vector<TerminalToggleTarget> targets;
@@ -8294,8 +8790,7 @@ bool DuctworkGeometry::ToggleSelectedEmoryTerminalSegmentStyle(std::string& outM
 		if (!DuctworkMetadata::GetString(art, kEmoryRoleKey, role) ||
 			(role != kEmoryRoleSegment &&
 			 role != kEmoryRoleGuide &&
-			 role != kEmoryRoleConnector &&
-			 role != kEmoryRoleCenterline)) {
+			 role != kEmoryRoleConnector)) {
 			continue;
 		}
 
@@ -8316,7 +8811,7 @@ bool DuctworkGeometry::ToggleSelectedEmoryTerminalSegmentStyle(std::string& outM
 				DuctworkLog::Write(logStream.str());
 				continue;
 			}
-		} else if (role != kEmoryRoleCenterline) {
+		} else {
 			if (!ReadGeneratedSegmentIndex(art, selectedSegmentIndex)) {
 				std::ostringstream logStream;
 				logStream << "Emory terminal-toggle missing-segment-index role=" << role
@@ -8328,20 +8823,35 @@ bool DuctworkGeometry::ToggleSelectedEmoryTerminalSegmentStyle(std::string& outM
 
 		AIArtHandle sourceArt = nullptr;
 		DuctworkPath sourcePath;
+		AIArtHandle backupArt = nullptr;
+		DuctworkPath backupPath;
+		const bool hasBackupCenterline = GetPrimaryBackupCenterlineForSourceId(sourceId, backupArt, backupPath);
+		bool resolvedFromBackupOnly = false;
+		const std::string scoringRole = (role == kEmoryRoleGuide) ? kEmoryRoleSegment : role;
 		int selectedStateIndex = -1;
 		if (!states.empty() &&
-			(FindBestStateIndexForGeneratedArt(art, role, sourceId, states, selectedStateIndex) ||
-			 FindBestStateIndexForGeneratedArtLoose(art, role, states, selectedStateIndex)) &&
+			(FindBestStateIndexForGeneratedArt(art, scoringRole, sourceId, states, selectedStateIndex) ||
+			 FindBestStateIndexForGeneratedArtLoose(art, scoringRole, states, selectedStateIndex)) &&
 			selectedStateIndex >= 0 &&
 			selectedStateIndex < static_cast<int>(states.size())) {
 			sourceArt = states[selectedStateIndex].art;
 			sourcePath = states[selectedStateIndex].path;
 		} else if (!FindSourceArtForSourceId(sourceId, sourceArt, sourcePath)) {
-			std::ostringstream logStream;
-			logStream << "Emory terminal-toggle missing-source sourceId=" << sourceId
-				<< " role=" << role;
-			DuctworkLog::Write(logStream.str());
-			continue;
+			if (hasBackupCenterline && backupArt && backupPath.points.size() >= 2) {
+				sourceArt = backupArt;
+				sourcePath = backupPath;
+				resolvedFromBackupOnly = true;
+				std::ostringstream logStream;
+				logStream << "Emory terminal-toggle backup-source-fallback sourceId=" << sourceId
+					<< " role=" << role;
+				DuctworkLog::Write(logStream.str());
+			} else {
+				std::ostringstream logStream;
+				logStream << "Emory terminal-toggle missing-source sourceId=" << sourceId
+					<< " role=" << role;
+				DuctworkLog::Write(logStream.str());
+				continue;
+			}
 		}
 
 		std::vector<DuctworkPoint> points;
@@ -8351,18 +8861,38 @@ bool DuctworkGeometry::ToggleSelectedEmoryTerminalSegmentStyle(std::string& outM
 		int canonicalSelectedSegmentIndex = selectedSegmentIndex;
 		int canonicalSelectedJointIndex = selectedJointIndex;
 
-		AIArtHandle backupArt = nullptr;
-		DuctworkPath backupPath;
-		if (GetPrimaryBackupCenterlineForSourceId(sourceId, backupArt, backupPath)) {
+		if (hasBackupCenterline) {
 			canonicalArt = backupArt;
 			canonicalPoints = backupPath.points;
-			if (role != kEmoryRoleConnector && role != kEmoryRoleCenterline) {
+			if (!resolvedFromBackupOnly && role != kEmoryRoleConnector) {
 				std::vector<int> backupIndices;
 				if (MapFragmentSegmentsToBackupIndices(points, backupPath.points, backupIndices) &&
 					selectedSegmentIndex >= 0 &&
 					selectedSegmentIndex < static_cast<int>(backupIndices.size()) &&
 					backupIndices[selectedSegmentIndex] >= 0) {
 					canonicalSelectedSegmentIndex = backupIndices[selectedSegmentIndex];
+				}
+			}
+		}
+
+		if (resolvedFromBackupOnly &&
+			role != kEmoryRoleConnector &&
+			canonicalPoints.size() >= 2) {
+			DuctworkPath selectedArtPath;
+			if (BuildProcessPathForArt(art, selectedArtPath) && !selectedArtPath.closed) {
+				std::vector<DuctworkPoint> selectedArtPoints;
+				SanitizePolyline(selectedArtPath.points, selectedArtPoints);
+				const int canonicalEndSegmentIndex = static_cast<int>(canonicalPoints.size()) - 2;
+				if (selectedArtPoints.size() >= 2) {
+					if (GuidePointsMatchTerminalSegment(selectedArtPoints, canonicalPoints, 0, 4.0)) {
+						canonicalSelectedSegmentIndex = 0;
+					} else if (canonicalEndSegmentIndex >= 0 &&
+						GuidePointsMatchTerminalSegment(selectedArtPoints,
+							canonicalPoints,
+							canonicalEndSegmentIndex,
+							4.0)) {
+						canonicalSelectedSegmentIndex = canonicalEndSegmentIndex;
+					}
 				}
 			}
 		}
@@ -8391,10 +8921,8 @@ bool DuctworkGeometry::ToggleSelectedEmoryTerminalSegmentStyle(std::string& outM
 			IsPointNearAny(canonicalPoints.front(), registerAttachmentPoints, 10.0);
 		const bool registerAtEnd = !canonicalPoints.empty() &&
 			IsPointNearAny(canonicalPoints.back(), registerAttachmentPoints, 10.0);
-		const bool effectiveRegisterAtStart = registerAtStart && !distributionTrunk;
-		const bool effectiveRegisterAtEnd = registerAtEnd && !distributionTrunk;
-		const bool allowStartTarget = omittedStart || effectiveRegisterAtStart || ReadTerminalSegmentStyle(canonicalArt, true) != "straight";
-		const bool allowEndTarget = omittedEnd || effectiveRegisterAtEnd || ReadTerminalSegmentStyle(canonicalArt, false) != "straight";
+		const bool allowStartTarget = omittedStart;
+		const bool allowEndTarget = omittedEnd;
 		bool addStart = false;
 		bool addEnd = false;
 		if (role == kEmoryRoleConnector) {
@@ -8404,9 +8932,6 @@ bool DuctworkGeometry::ToggleSelectedEmoryTerminalSegmentStyle(std::string& outM
 				allowEndTarget,
 				addStart,
 				addEnd);
-		} else if (role == kEmoryRoleCenterline) {
-			addStart = allowStartTarget && omittedStart;
-			addEnd = allowEndTarget && omittedEnd;
 		} else {
 			ResolveTerminalStyleTargetFromSelection(canonicalSelectedSegmentIndex,
 				canonicalSegmentCount,
@@ -8441,9 +8966,13 @@ bool DuctworkGeometry::ToggleSelectedEmoryTerminalSegmentStyle(std::string& outM
 				target.sourceId = sourceId;
 				target.sourceArt = sourceArt;
 				target.sourcePath = sourcePath;
+				target.sourcePoints = points;
 				target.canonicalArt = canonicalArt;
 				target.canonicalPoints = canonicalPoints;
+				target.sourceTerminalSegmentIndex = points.size() > 1 ? 0 : -1;
 				target.atStart = true;
+				target.omittedTerminal = omittedStart;
+				target.resolvedFromBackupOnly = resolvedFromBackupOnly;
 				targets.push_back(target);
 			}
 		}
@@ -8454,9 +8983,13 @@ bool DuctworkGeometry::ToggleSelectedEmoryTerminalSegmentStyle(std::string& outM
 				target.sourceId = sourceId;
 				target.sourceArt = sourceArt;
 				target.sourcePath = sourcePath;
+				target.sourcePoints = points;
 				target.canonicalArt = canonicalArt;
 				target.canonicalPoints = canonicalPoints;
+				target.sourceTerminalSegmentIndex = points.size() > 1 ? static_cast<int>(points.size() - 2) : -1;
 				target.atStart = false;
+				target.omittedTerminal = omittedEnd;
+				target.resolvedFromBackupOnly = resolvedFromBackupOnly;
 				targets.push_back(target);
 			}
 		}
@@ -8473,8 +9006,64 @@ bool DuctworkGeometry::ToggleSelectedEmoryTerminalSegmentStyle(std::string& outM
 			allCurved = false;
 		}
 	}
-	const std::string nextStyle = allCurved ? "straight" : "curved";
+	std::string nextStyle = allCurved ? "straight" : "curved";
+	if (useRequestedStyle) {
+		if (requestedStyle != "curved" && requestedStyle != "straight") {
+			outMessage = "Invalid final segment style target.";
+			return false;
+		}
+		nextStyle = requestedStyle;
+	}
 	std::set<std::string> affectedSourceIds;
+	std::vector<GeneratedGuideCandidate> guideCandidates;
+	{
+		std::vector<AIArtHandle> allPaths;
+		CollectAllDocumentPaths(allPaths);
+		guideCandidates.reserve(allPaths.size());
+		for (size_t i = 0; i < allPaths.size(); ++i) {
+			AIArtHandle art = allPaths[i];
+			if (!art || !IsGeneratedEmoryArtInternal(art)) {
+				continue;
+			}
+
+			std::string role;
+			if (!DuctworkMetadata::GetString(art, kEmoryRoleKey, role) ||
+				role != kEmoryRoleGuide) {
+				continue;
+			}
+
+			std::string sourceId;
+			if (!DuctworkMetadata::GetString(art, kEmorySourceIdKey, sourceId) || sourceId.empty()) {
+				sourceId = ReadEmorySourceIdFromNote(art);
+			}
+			if (sourceId.empty()) {
+				continue;
+			}
+
+			int segmentIndex = -1;
+			if (!ReadGeneratedSegmentIndex(art, segmentIndex)) {
+				continue;
+			}
+
+			if (role == kEmoryRoleGuide) {
+				DuctworkPath guidePath;
+				if (!BuildProcessPathForArt(art, guidePath)) {
+					continue;
+				}
+
+				GeneratedGuideCandidate candidate;
+				candidate.art = art;
+				candidate.sourceId = sourceId;
+				candidate.segmentIndex = segmentIndex;
+				SanitizePolyline(guidePath.points, candidate.points);
+				guideCandidates.push_back(candidate);
+			}
+		}
+	}
+	size_t sourcePathUpdates = 0;
+	size_t visibleGuideUpdates = 0;
+	size_t createdVisibleGuides = 0;
+	std::set<AIArtHandle> updatedGuideArts;
 
 	for (size_t i = 0; i < targets.size(); ++i) {
 		TerminalToggleTarget& target = targets[i];
@@ -8483,54 +9072,196 @@ bool DuctworkGeometry::ToggleSelectedEmoryTerminalSegmentStyle(std::string& outM
 			continue;
 		}
 		const int terminalCanonicalIndex = target.atStart ? 0 : static_cast<int>(canonicalSegmentCount - 1);
-		WriteTerminalSegmentStyle(target.canonicalArt, target.atStart, nextStyle);
-		ApplyTerminalSegmentStyleToPathArt(target.canonicalArt, terminalCanonicalIndex, nextStyle);
 		affectedSourceIds.insert(target.sourceId);
+		const EmorySourceState* displayState = nullptr;
+		std::map<std::string, int>::const_iterator displayStateIt = stateIndexBySourceId.find(target.sourceId);
+		if (displayStateIt != stateIndexBySourceId.end() &&
+			displayStateIt->second >= 0 &&
+			displayStateIt->second < static_cast<int>(states.size())) {
+			displayState = &states[displayStateIt->second];
+		}
+		std::vector<AIArtHandle> sourceArts;
+		CollectCenterlineAndBackupArtsForSourceId(target.sourceId, sourceArts);
+		if (sourceArts.empty()) {
+			if (target.canonicalArt) {
+				sourceArts.push_back(target.canonicalArt);
+			}
+			if (target.sourceArt && target.sourceArt != target.canonicalArt) {
+				sourceArts.push_back(target.sourceArt);
+			}
+		}
+		std::set<AIArtHandle> updatedArts;
+		for (size_t artIndex = 0; artIndex < sourceArts.size(); ++artIndex) {
+			AIArtHandle sourceTargetArt = sourceArts[artIndex];
+			if (!sourceTargetArt || !updatedArts.insert(sourceTargetArt).second) {
+				continue;
+			}
+			WriteTerminalSegmentStyle(sourceTargetArt, target.atStart, nextStyle);
+
+			int targetSegmentIndexForArt = -1;
+			if (sourceTargetArt == target.canonicalArt) {
+				targetSegmentIndexForArt = terminalCanonicalIndex;
+			} else {
+				DuctworkPath artPath;
+				if (BuildProcessPathForArt(sourceTargetArt, artPath)) {
+					std::vector<DuctworkPoint> artPoints;
+					SanitizePolyline(artPath.points, artPoints);
+					const int artSegmentCount = static_cast<int>(artPoints.size()) - 1;
+					if (artSegmentCount > 0) {
+						if (PathSegmentMatchesReference(artPoints,
+								0,
+								target.canonicalPoints,
+								terminalCanonicalIndex,
+								4.0)) {
+							targetSegmentIndexForArt = 0;
+						} else if (PathSegmentMatchesReference(artPoints,
+								artSegmentCount - 1,
+								target.canonicalPoints,
+								terminalCanonicalIndex,
+								4.0)) {
+							targetSegmentIndexForArt = artSegmentCount - 1;
+						}
+					}
+				}
+			}
+
+			if (targetSegmentIndexForArt >= 0 &&
+				ApplyTerminalSegmentStyleToPathArt(sourceTargetArt, targetSegmentIndexForArt, nextStyle)) {
+				++sourcePathUpdates;
+			}
+		}
+
+		bool matchedVisibleGuideForTarget = false;
+		for (size_t guideIndex = 0; guideIndex < guideCandidates.size(); ++guideIndex) {
+			GeneratedGuideCandidate& candidate = guideCandidates[guideIndex];
+			if (candidate.sourceId != target.sourceId ||
+				!candidate.art ||
+				!updatedGuideArts.insert(candidate.art).second) {
+				continue;
+			}
+
+			const bool segmentMatches = candidate.segmentIndex == terminalCanonicalIndex;
+			const bool canonicalGeometryMatches = GuidePointsMatchTerminalSegment(candidate.points,
+				target.canonicalPoints,
+				terminalCanonicalIndex,
+				4.0);
+			const bool localSegmentMatches =
+				target.sourceTerminalSegmentIndex >= 0 &&
+				candidate.segmentIndex == target.sourceTerminalSegmentIndex;
+			const bool localGeometryMatches =
+				target.sourceTerminalSegmentIndex >= 0 &&
+				GuidePointsMatchTerminalSegment(candidate.points,
+					target.sourcePoints,
+					target.sourceTerminalSegmentIndex,
+					4.0);
+			if (!segmentMatches && !canonicalGeometryMatches && !localSegmentMatches && !localGeometryMatches) {
+				updatedGuideArts.erase(candidate.art);
+				continue;
+			}
+			matchedVisibleGuideForTarget = true;
+
+			if (ApplyTerminalGuideStyleToGuideArt(candidate.art,
+				(target.sourceTerminalSegmentIndex >= 0 ? target.sourcePoints : target.canonicalPoints),
+				static_cast<size_t>(target.sourceTerminalSegmentIndex >= 0 ? target.sourceTerminalSegmentIndex : terminalCanonicalIndex),
+				nextStyle)) {
+				++visibleGuideUpdates;
+			}
+		}
+
+		if (!matchedVisibleGuideForTarget &&
+			target.omittedTerminal &&
+			target.sourceArt &&
+			target.sourceTerminalSegmentIndex >= 0 &&
+			target.sourceTerminalSegmentIndex + 1 < static_cast<int>(target.sourcePoints.size())) {
+			AIArtHandle referenceArt = target.sourceArt;
+			if (displayState) {
+				ResolveReferenceArtForSourceId(*displayState, referenceArt);
+			}
+
+			std::vector<DuctworkPoint> guidePoints;
+			guidePoints.push_back(target.sourcePoints[static_cast<size_t>(target.sourceTerminalSegmentIndex)]);
+			guidePoints.push_back(target.sourcePoints[static_cast<size_t>(target.sourceTerminalSegmentIndex + 1)]);
+
+			AIArtHandle guideArt = nullptr;
+			if (CreateOpenPath(referenceArt, guidePoints, guideArt) &&
+				guideArt &&
+				ApplyGuideStyleInternal(guideArt, GetEmoryColorSpec(target.sourcePath.layerName)) &&
+				ApplyTerminalGuideStyleToGuideArt(guideArt,
+					target.sourcePoints,
+					static_cast<size_t>(target.sourceTerminalSegmentIndex),
+					nextStyle)) {
+				TagGeneratedArt(guideArt, kEmoryRoleGuide, target.sourceId, 0.0,
+					target.sourceTerminalSegmentIndex, -1, std::string());
+				++visibleGuideUpdates;
+				++createdVisibleGuides;
+			} else if (guideArt) {
+				sAIArt->DisposeArt(guideArt);
+			}
+		}
 
 		{
 			std::ostringstream logStream;
 			logStream << "Emory terminal-toggle apply sourceId=" << target.sourceId
 				<< " targetCanonicalIndex=" << terminalCanonicalIndex
 				<< " terminalAtStart=" << (target.atStart ? 1 : 0)
+				<< " backupOnly=" << (target.resolvedFromBackupOnly ? 1 : 0)
 				<< " nextStyle=" << nextStyle;
 			DuctworkLog::Write(logStream.str());
 		}
 	}
 
-	std::vector<DuctworkPath> regeneratePaths;
-	for (size_t i = 0; i < states.size(); ++i) {
-		if (affectedSourceIds.find(states[i].sourceId) != affectedSourceIds.end()) {
-			regeneratePaths.push_back(states[i].path);
-		}
+	if (createdVisibleGuides > 0) {
+		std::vector<std::string> orderingSourceIds(affectedSourceIds.begin(), affectedSourceIds.end());
+		ApplyFinalEmoryOrdering(orderingSourceIds);
 	}
-	if (regeneratePaths.empty()) {
-		for (size_t i = 0; i < targets.size(); ++i) {
-			regeneratePaths.push_back(targets[i].sourcePath);
-		}
-	}
-
-	std::vector<std::string> sourceIds(affectedSourceIds.begin(), affectedSourceIds.end());
-	DeleteGeneratedEmoryBodies(sourceIds);
-	GenerateEmoryBodies(regeneratePaths);
 
 	{
 		std::ostringstream logStream;
 		logStream << "Emory terminal-toggle complete sources=" << affectedSourceIds.size()
 			<< " targets=" << targets.size()
-			<< " nextStyle=" << nextStyle;
+			<< " nextStyle=" << nextStyle
+			<< " sourcePathUpdates=" << sourcePathUpdates
+			<< " guideCandidates=" << guideCandidates.size()
+			<< " visibleGuideUpdates=" << visibleGuideUpdates
+			<< " createdVisibleGuides=" << createdVisibleGuides
+			<< " regenerated=0";
 		DuctworkLog::Write(logStream.str());
 	}
 
 	std::ostringstream message;
-	message << "Set " << targets.size() << " selected final ";
+	message << "Updated " << targets.size() << " selected final ";
 	if (targets.size() == 1) {
-		message << "tail";
+		message << "segment";
 	} else {
-		message << "tails";
+		message << "segments";
 	}
 	message << " to " << nextStyle << ".";
+	if (sourcePathUpdates > 0) {
+		message << " Updated " << sourcePathUpdates << " source path terminal";
+		if (sourcePathUpdates != 1) {
+			message << "s";
+		}
+		message << ".";
+	}
+	if (visibleGuideUpdates > 0) {
+		message << " Restyled " << visibleGuideUpdates << " visible final guide";
+		if (visibleGuideUpdates != 1) {
+			message << "s";
+		}
+		message << ".";
+	}
 	outMessage = message.str();
 	return true;
+}
+
+bool DuctworkGeometry::ToggleSelectedEmoryTerminalSegmentStyle(std::string& outMessage)
+{
+	return ApplySelectedEmoryTerminalSegmentStyleInternal(std::string(), false, outMessage);
+}
+
+bool DuctworkGeometry::SetSelectedEmoryTerminalSegmentStyle(const std::string& targetStyle, std::string& outMessage)
+{
+	return ApplySelectedEmoryTerminalSegmentStyleInternal(targetStyle == "curved" ? "curved" : "straight", true, outMessage);
 }
 
 bool DuctworkGeometry::GetSelectedEmorySegmentState(std::string& outJson)
@@ -8541,183 +9272,10 @@ bool DuctworkGeometry::GetSelectedEmorySegmentState(std::string& outJson)
 		return false;
 	}
 
-	NormalizeDuplicateEmorySourceIds();
-
 	std::vector<AIArtHandle> selection;
 	DuctworkSelection::CollectSelectedPaths(selection);
 	if (selection.empty()) {
 		return true;
-	}
-
-	std::map<std::string, std::vector<int> > selectedBySource;
-	AIArtHandle singleSelectedSegmentArt = nullptr;
-	size_t selectedGeneratedSegmentCount = 0;
-	AIArtHandle selectedTerminalToggleArt = nullptr;
-	std::string selectedTerminalToggleRole;
-	std::string selectedTerminalToggleSourceId;
-	int selectedTerminalToggleSegmentIndex = -1;
-	int selectedTerminalToggleJointIndex = -1;
-	std::string selectedTerminalToggleKey;
-	for (size_t i = 0; i < selection.size(); ++i) {
-		AIArtHandle art = selection[i];
-		if (!art) {
-			continue;
-		}
-
-		std::string role;
-		if (!DuctworkMetadata::GetString(art, kEmoryRoleKey, role) ||
-			(role != kEmoryRoleSegment && role != kEmoryRoleGuide && role != kEmoryRoleConnector)) {
-			continue;
-		}
-
-		std::string artSourceId;
-		if (!DuctworkMetadata::GetString(art, kEmorySourceIdKey, artSourceId) || artSourceId.empty()) {
-			artSourceId = ReadEmorySourceIdFromNote(art);
-		}
-		if (artSourceId.empty()) {
-			continue;
-		}
-
-		int segmentIndex = -1;
-		int jointIndex = -1;
-		if (role == kEmoryRoleConnector) {
-			if (!ReadGeneratedJointIndex(art, jointIndex)) {
-				continue;
-			}
-		} else {
-			if (!ReadGeneratedSegmentIndex(art, segmentIndex)) {
-				continue;
-			}
-		}
-
-		if (role == kEmoryRoleSegment) {
-			++selectedGeneratedSegmentCount;
-			if (selectedGeneratedSegmentCount == 1) {
-				singleSelectedSegmentArt = art;
-			} else {
-				singleSelectedSegmentArt = nullptr;
-			}
-			selectedBySource[artSourceId].push_back(segmentIndex);
-		}
-
-		if (role == kEmoryRoleSegment || role == kEmoryRoleGuide || role == kEmoryRoleConnector) {
-			std::ostringstream segmentKeyStream;
-			segmentKeyStream << artSourceId << "#";
-			if (role == kEmoryRoleConnector) {
-				segmentKeyStream << "joint:" << jointIndex;
-			} else {
-				segmentKeyStream << segmentIndex;
-			}
-			const std::string segmentKey = segmentKeyStream.str();
-			if (selectedTerminalToggleKey.empty() || selectedTerminalToggleKey == segmentKey) {
-				selectedTerminalToggleArt = art;
-				selectedTerminalToggleRole = role;
-				selectedTerminalToggleSourceId = artSourceId;
-				selectedTerminalToggleSegmentIndex = segmentIndex;
-				selectedTerminalToggleJointIndex = jointIndex;
-				selectedTerminalToggleKey = segmentKey;
-			} else {
-				selectedTerminalToggleArt = nullptr;
-				selectedTerminalToggleRole.clear();
-				selectedTerminalToggleSourceId.clear();
-				selectedTerminalToggleSegmentIndex = -1;
-				selectedTerminalToggleJointIndex = -1;
-				selectedTerminalToggleKey = "__multiple__";
-			}
-		}
-	}
-
-	bool terminalToggleAvailableWithoutWidthSelection = false;
-	std::string terminalToggleStyleWithoutWidthSelection = "straight";
-	if (selectedTerminalToggleArt &&
-		!selectedTerminalToggleSourceId.empty() &&
-		(selectedTerminalToggleSegmentIndex >= 0 || selectedTerminalToggleJointIndex >= 0)) {
-		std::vector<DuctworkPoint> registerAttachmentPoints;
-		CollectRegisterAttachmentPoints(registerAttachmentPoints);
-		std::vector<EmorySourceState> terminalStates;
-		std::map<std::string, int> terminalStateIndexBySourceId;
-		CollectEmorySourceStates(terminalStates, terminalStateIndexBySourceId);
-		std::vector<DuctworkConnection> terminalConnections;
-		CollectEmoryNetworkConnections(terminalStates, terminalConnections);
-
-		AIArtHandle terminalSourceArt = nullptr;
-		DuctworkPath terminalSourcePath;
-		int terminalStateIndex = -1;
-		if (!terminalStates.empty() &&
-			(FindBestStateIndexForGeneratedArt(selectedTerminalToggleArt,
-				selectedTerminalToggleRole,
-				selectedTerminalToggleSourceId,
-				terminalStates,
-				terminalStateIndex) ||
-			 FindBestStateIndexForGeneratedArtLoose(selectedTerminalToggleArt,
-				selectedTerminalToggleRole,
-				terminalStates,
-				terminalStateIndex)) &&
-			terminalStateIndex >= 0 &&
-			terminalStateIndex < static_cast<int>(terminalStates.size())) {
-			terminalSourceArt = terminalStates[terminalStateIndex].art;
-			terminalSourcePath = terminalStates[terminalStateIndex].path;
-		} else {
-			FindSourceArtForSourceId(selectedTerminalToggleSourceId, terminalSourceArt, terminalSourcePath);
-		}
-
-		std::vector<DuctworkPoint> terminalPoints;
-		SanitizePolyline(terminalSourcePath.points, terminalPoints);
-		size_t terminalSegmentCount = terminalPoints.size() > 1 ? (terminalPoints.size() - 1) : 0;
-		int terminalCanonicalIndex = selectedTerminalToggleSegmentIndex;
-		int terminalCanonicalJointIndex = selectedTerminalToggleJointIndex;
-		AIArtHandle terminalStyleSourceArt = terminalSourceArt;
-		AIArtHandle terminalBackupArt = nullptr;
-		DuctworkPath terminalBackupPath;
-		if (GetPrimaryBackupCenterlineForSourceId(selectedTerminalToggleSourceId, terminalBackupArt, terminalBackupPath)) {
-			terminalStyleSourceArt = terminalBackupArt;
-			terminalSegmentCount = terminalBackupPath.points.size() > 1 ? (terminalBackupPath.points.size() - 1) : 0;
-			if (selectedTerminalToggleRole != kEmoryRoleConnector) {
-				std::vector<int> backupIndices;
-				if (MapFragmentSegmentsToBackupIndices(terminalPoints, terminalBackupPath.points, backupIndices) &&
-					terminalCanonicalIndex >= 0 &&
-					terminalCanonicalIndex < static_cast<int>(backupIndices.size()) &&
-					backupIndices[terminalCanonicalIndex] >= 0) {
-					terminalCanonicalIndex = backupIndices[terminalCanonicalIndex];
-				}
-			}
-		}
-
-		std::set<size_t> terminalOmittedSegments;
-		CollectTerminalOmittedSegments(terminalStyleSourceArt, terminalSegmentCount, terminalOmittedSegments);
-		const bool distributionTrunk =
-			terminalStateIndex >= 0 &&
-			CountEndpointToSegmentBranchChildren(terminalStateIndex, terminalConnections) >= 2;
-		const bool registerAtStart = !terminalPoints.empty() &&
-			IsPointNearAny(terminalPoints.front(), registerAttachmentPoints, 10.0);
-		const bool registerAtEnd = !terminalPoints.empty() &&
-			IsPointNearAny(terminalPoints.back(), registerAttachmentPoints, 10.0);
-		const bool allowStartTarget = (registerAtStart && !distributionTrunk) || ReadTerminalSegmentStyle(terminalStyleSourceArt, true) != "straight";
-		const bool allowEndTarget = (registerAtEnd && !distributionTrunk) || ReadTerminalSegmentStyle(terminalStyleSourceArt, false) != "straight";
-		bool terminalAtStart = false;
-		bool terminalAtEnd = false;
-		bool resolvedTerminalTarget = false;
-		if (selectedTerminalToggleRole == kEmoryRoleConnector) {
-			resolvedTerminalTarget = ResolveTerminalStyleTargetFromJoint(terminalCanonicalJointIndex,
-				terminalSegmentCount,
-				allowStartTarget,
-				allowEndTarget,
-				terminalAtStart,
-				terminalAtEnd);
-		} else {
-			resolvedTerminalTarget = ResolveTerminalStyleTargetFromSelection(terminalCanonicalIndex,
-				terminalSegmentCount,
-				terminalOmittedSegments,
-				allowStartTarget,
-				allowEndTarget,
-				terminalAtStart,
-				terminalAtEnd);
-		}
-		if (terminalStyleSourceArt && resolvedTerminalTarget) {
-			terminalToggleAvailableWithoutWidthSelection = true;
-			terminalToggleStyleWithoutWidthSelection =
-				ReadTerminalSegmentStyle(terminalStyleSourceArt, terminalAtStart);
-		}
 	}
 
 	std::vector<AIArtHandle> selectedThermostatArts;
@@ -8770,6 +9328,35 @@ bool DuctworkGeometry::GetSelectedEmorySegmentState(std::string& outJson)
 		}
 	}
 
+	std::map<std::string, std::vector<int> > selectedBySource;
+	for (size_t i = 0; i < selection.size(); ++i) {
+		AIArtHandle art = selection[i];
+		if (!art) {
+			continue;
+		}
+
+		std::string role;
+		if (!DuctworkMetadata::GetString(art, kEmoryRoleKey, role) ||
+			role != kEmoryRoleSegment) {
+			continue;
+		}
+
+		std::string artSourceId;
+		if (!DuctworkMetadata::GetString(art, kEmorySourceIdKey, artSourceId) || artSourceId.empty()) {
+			artSourceId = ReadEmorySourceIdFromNote(art);
+		}
+		if (artSourceId.empty()) {
+			continue;
+		}
+
+		int segmentIndex = -1;
+		if (!ReadGeneratedSegmentIndex(art, segmentIndex)) {
+			continue;
+		}
+
+		selectedBySource[artSourceId].push_back(segmentIndex);
+	}
+
 	if (selectedBySource.empty()) {
 		if (!selectedThermostatArts.empty() || !strokeSourceIds.empty()) {
 			std::ostringstream out;
@@ -8784,22 +9371,64 @@ bool DuctworkGeometry::GetSelectedEmorySegmentState(std::string& outJson)
 				<< ",\"hasExplicitStart\":false"
 				<< ",\"canClearStart\":false"
 				<< ",\"centerlinesHidden\":false"
-				<< ",\"canToggleTerminalStyle\":" << (terminalToggleAvailableWithoutWidthSelection ? "true" : "false")
-				<< ",\"terminalStyle\":\"" << JsonEscape(terminalToggleStyleWithoutWidthSelection) << "\""
+				<< ",\"canToggleTerminalStyle\":false"
+				<< ",\"terminalStyle\":\"straight\""
 				<< "}";
 			outJson = out.str();
 			return true;
 		}
-		{
-			std::ostringstream out;
-			out << "{\"ok\":true,\"available\":false,\"reason\":\"no-segment-selection\""
-				<< ",\"canApplyStroke\":false"
-				<< ",\"canToggleTerminalStyle\":" << (terminalToggleAvailableWithoutWidthSelection ? "true" : "false")
-				<< ",\"terminalStyle\":\"" << JsonEscape(terminalToggleStyleWithoutWidthSelection) << "\""
-				<< "}";
-			outJson = out.str();
-		}
+		outJson = "{\"ok\":true,\"available\":false,\"reason\":\"no-segment-selection\",\"canApplyWidth\":false,\"canApplyStroke\":false}";
 		return true;
+	}
+
+	struct SelectedSourceInfo
+	{
+		AIArtHandle art = nullptr;
+		DuctworkPath path;
+	};
+
+	std::set<std::string> requestedSourceIds;
+	for (std::map<std::string, std::vector<int> >::const_iterator it = selectedBySource.begin();
+		it != selectedBySource.end();
+		++it) {
+		if (!it->first.empty()) {
+			requestedSourceIds.insert(it->first);
+		}
+	}
+
+	std::map<std::string, SelectedSourceInfo> sourceInfoById;
+	std::vector<AIArtHandle> allPaths;
+	CollectAllLineLayerPaths(allPaths);
+	for (size_t i = 0; i < allPaths.size(); ++i) {
+		AIArtHandle art = allPaths[i];
+		if (!art || IsGeneratedEmoryArtInternal(art) || IsBackupCenterlineArt(art)) {
+			continue;
+		}
+
+		DuctworkPath path;
+		if (!BuildProcessPathForArt(art, path) ||
+			!DuctworkGeometry::IsCenterlineCandidate(path.art, path.points, path.closed, path.layerName)) {
+			continue;
+		}
+
+		std::string sourceId;
+		if (!DuctworkGeometry::EnsureEmorySourceId(art, sourceId) || sourceId.empty()) {
+			continue;
+		}
+
+		if (requestedSourceIds.find(sourceId) == requestedSourceIds.end() ||
+			sourceInfoById.find(sourceId) != sourceInfoById.end()) {
+			continue;
+		}
+
+		SelectedSourceInfo info;
+		info.art = art;
+		info.path = path;
+		sourceInfoById[sourceId] = info;
+
+		if (sourceInfoById.size() == requestedSourceIds.size()) {
+			break;
+		}
 	}
 
 	if (selectedBySource.size() > 1) {
@@ -8813,11 +9442,12 @@ bool DuctworkGeometry::GetSelectedEmorySegmentState(std::string& outJson)
 			it->second.erase(std::unique(it->second.begin(), it->second.end()), it->second.end());
 			selectedCount += it->second.size();
 
-			AIArtHandle sourceArt = nullptr;
-			DuctworkPath sourcePath;
-			if (!FindSourceArtForSourceId(it->first, sourceArt, sourcePath)) {
+			std::map<std::string, SelectedSourceInfo>::const_iterator sourceInfoIt = sourceInfoById.find(it->first);
+			if (sourceInfoIt == sourceInfoById.end() || !sourceInfoIt->second.art) {
 				continue;
 			}
+			AIArtHandle sourceArt = sourceInfoIt->second.art;
+			const DuctworkPath& sourcePath = sourceInfoIt->second.path;
 
 			std::vector<DuctworkPoint> points;
 			SanitizePolyline(sourcePath.points, points);
@@ -8836,6 +9466,12 @@ bool DuctworkGeometry::GetSelectedEmorySegmentState(std::string& outJson)
 
 			std::vector<double> widths;
 			ReadSegmentWidths(sourceArt, segmentCount, defaultWidth, widths);
+			if (!HasStoredSegmentWidths(sourceArt, segmentCount)) {
+				ApplyDefaultStraightChainTapers(sourceArt,
+					points,
+					ReadStartSegmentIndex(sourceArt, segmentCount),
+					widths);
+			}
 			for (size_t i = 0; i < it->second.size(); ++i) {
 				const int segmentIndex = it->second[i];
 				if (segmentIndex < 0 || segmentIndex >= static_cast<int>(widths.size())) {
@@ -8869,6 +9505,9 @@ bool DuctworkGeometry::GetSelectedEmorySegmentState(std::string& outJson)
 			<< ",\"isStartSegment\":false"
 			<< ",\"canSetStart\":false"
 			<< ",\"canApplyWidth\":true"
+			<< ",\"canToggleTerminalStyle\":false"
+			<< ",\"terminalStyle\":\"straight\""
+			<< ",\"taperAlignmentAvailable\":false"
 			<< ",\"cascadeDirection\":\"multiple-runs\""
 			<< "}";
 		outJson = out.str();
@@ -8880,36 +9519,13 @@ bool DuctworkGeometry::GetSelectedEmorySegmentState(std::string& outJson)
 	std::sort(selectedSegmentIndices.begin(), selectedSegmentIndices.end());
 	selectedSegmentIndices.erase(std::unique(selectedSegmentIndices.begin(), selectedSegmentIndices.end()), selectedSegmentIndices.end());
 
-	std::vector<EmorySourceState> states;
-	std::map<std::string, int> stateIndexBySourceId;
-	CollectEmorySourceStates(states, stateIndexBySourceId);
-
-	const AIArtHandle selectedSegmentArt = (selectedSegmentIndices.size() == 1 && selectedGeneratedSegmentCount == 1)
-		? singleSelectedSegmentArt
-		: nullptr;
-	int selectedStateIndex = -1;
-	if (selectedSegmentIndices.size() == 1 && selectedSegmentArt && !states.empty()) {
-		if (!FindBestStateIndexForGeneratedArt(selectedSegmentArt,
-			kEmoryRoleSegment,
-			sourceId,
-			states,
-			selectedStateIndex)) {
-			FindBestStateIndexForGeneratedArtLoose(selectedSegmentArt,
-				kEmoryRoleSegment,
-				states,
-				selectedStateIndex);
-		}
-	}
-
-	AIArtHandle sourceArt = nullptr;
-	DuctworkPath sourcePath;
-	if (selectedStateIndex >= 0 && selectedStateIndex < static_cast<int>(states.size())) {
-		sourceArt = states[selectedStateIndex].art;
-		sourcePath = states[selectedStateIndex].path;
-	} else if (!FindSourceArtForSourceId(sourceId, sourceArt, sourcePath)) {
+	std::map<std::string, SelectedSourceInfo>::const_iterator sourceInfoIt = sourceInfoById.find(sourceId);
+	if (sourceInfoIt == sourceInfoById.end() || !sourceInfoIt->second.art) {
 		outJson = "{\"ok\":true,\"available\":false,\"reason\":\"source-not-found\"}";
 		return true;
 	}
+	AIArtHandle sourceArt = sourceInfoIt->second.art;
+	DuctworkPath sourcePath = sourceInfoIt->second.path;
 
 	std::vector<DuctworkPoint> points;
 	SanitizePolyline(sourcePath.points, points);
@@ -8929,26 +9545,25 @@ bool DuctworkGeometry::GetSelectedEmorySegmentState(std::string& outJson)
 
 	std::vector<double> segmentWidths;
 	ReadSegmentWidths(sourceArt, segmentCount, defaultWidth, segmentWidths);
-	const int startSegmentIndex = (selectedStateIndex >= 0 && selectedStateIndex < static_cast<int>(states.size()))
-		? states[selectedStateIndex].startSegmentIndex
-		: ReadStartSegmentIndex(sourceArt, segmentCount);
-	const bool hasExplicitStart = (selectedStateIndex >= 0 && selectedStateIndex < static_cast<int>(states.size()))
-		? states[selectedStateIndex].hasExplicitStart
-		: HasExplicitStartSegmentIndex(sourceArt);
+	const int startSegmentIndex = ReadStartSegmentIndex(sourceArt, segmentCount);
+	const bool hasExplicitStart = HasExplicitStartSegmentIndex(sourceArt);
 	if (!HasStoredSegmentWidths(sourceArt, segmentCount)) {
 		ApplyDefaultStraightChainTapers(sourceArt, points, startSegmentIndex, segmentWidths);
 	}
-	std::vector<StraightChainInfo> straightChains;
-	std::vector<int> straightChainIndexBySegment;
-	CollectStraightChainInfos(sourceArt, points, segmentWidths, straightChains, straightChainIndexBySegment);
-	bool taperAlignmentAvailable = false;
-	std::string taperAlignment = "center";
-	std::string taperOrientation;
-	bool canToggleTerminalStyle = false;
-	std::string terminalStyle = "straight";
-	int canonicalSelectedSegmentIndex = -1;
-	AIArtHandle terminalStyleSourceArt = sourceArt;
-	size_t canonicalSegmentCountForTerminalStyle = segmentCount;
+
+	std::vector<int> validSelectedSegmentIndices;
+	validSelectedSegmentIndices.reserve(selectedSegmentIndices.size());
+	for (size_t i = 0; i < selectedSegmentIndices.size(); ++i) {
+		const int segmentIndex = selectedSegmentIndices[i];
+		if (segmentIndex >= 0 && segmentIndex < static_cast<int>(segmentWidths.size())) {
+			validSelectedSegmentIndices.push_back(segmentIndex);
+		}
+	}
+	if (validSelectedSegmentIndices.empty()) {
+		outJson = "{\"ok\":true,\"available\":false,\"reason\":\"segment-not-found\"}";
+		return true;
+	}
+	selectedSegmentIndices.swap(validSelectedSegmentIndices);
 
 	bool mixedWidths = false;
 	double firstWidth = 0.0;
@@ -8965,47 +9580,6 @@ bool DuctworkGeometry::GetSelectedEmorySegmentState(std::string& outJson)
 		} else if (std::fabs(width - firstWidth) > 1e-6) {
 			mixedWidths = true;
 			break;
-		}
-	}
-
-	if (selectedSegmentIndices.size() == 1) {
-		canonicalSelectedSegmentIndex = selectedSegmentIndices[0];
-		AIArtHandle backupArt = nullptr;
-		DuctworkPath backupPath;
-		if (GetPrimaryBackupCenterlineForSourceId(sourceId, backupArt, backupPath)) {
-			std::vector<int> backupIndices;
-			if (MapFragmentSegmentsToBackupIndices(points, backupPath.points, backupIndices) &&
-				canonicalSelectedSegmentIndex >= 0 &&
-				canonicalSelectedSegmentIndex < static_cast<int>(backupIndices.size()) &&
-				backupIndices[canonicalSelectedSegmentIndex] >= 0) {
-				canonicalSelectedSegmentIndex = backupIndices[canonicalSelectedSegmentIndex];
-				terminalStyleSourceArt = backupArt;
-				canonicalSegmentCountForTerminalStyle = backupPath.points.size() > 1 ? (backupPath.points.size() - 1) : 0;
-			}
-		}
-		std::set<size_t> terminalOmittedSegments;
-		CollectTerminalOmittedSegments(terminalStyleSourceArt,
-			canonicalSegmentCountForTerminalStyle,
-			terminalOmittedSegments);
-		std::vector<DuctworkPoint> registerAttachmentPoints;
-		CollectRegisterAttachmentPoints(registerAttachmentPoints);
-		const bool registerAtStart = !points.empty() &&
-			IsPointNearAny(points.front(), registerAttachmentPoints, 10.0);
-		const bool registerAtEnd = !points.empty() &&
-			IsPointNearAny(points.back(), registerAttachmentPoints, 10.0);
-		const bool allowStartTarget = registerAtStart || ReadTerminalSegmentStyle(terminalStyleSourceArt, true) != "straight";
-		const bool allowEndTarget = registerAtEnd || ReadTerminalSegmentStyle(terminalStyleSourceArt, false) != "straight";
-		bool terminalAtStart = false;
-		bool terminalAtEnd = false;
-		if (ResolveTerminalStyleTargetFromSelection(canonicalSelectedSegmentIndex,
-			canonicalSegmentCountForTerminalStyle,
-			terminalOmittedSegments,
-			allowStartTarget,
-			allowEndTarget,
-			terminalAtStart,
-			terminalAtEnd)) {
-			canToggleTerminalStyle = true;
-			terminalStyle = ReadTerminalSegmentStyle(terminalStyleSourceArt, terminalAtStart);
 		}
 	}
 
@@ -9036,42 +9610,10 @@ bool DuctworkGeometry::GetSelectedEmorySegmentState(std::string& outJson)
 		}
 		out << selectedSegmentIndices[i];
 	}
-	out << "]";
-
-	if (!selectedSegmentIndices.empty()) {
-		int firstChainIndex = -1;
-		bool sameChain = true;
-		for (size_t i = 0; i < selectedSegmentIndices.size(); ++i) {
-			const int segmentIndex = selectedSegmentIndices[i];
-			int chainIndex = -1;
-			if (segmentIndex >= 0 && segmentIndex < static_cast<int>(straightChainIndexBySegment.size())) {
-				chainIndex = straightChainIndexBySegment[segmentIndex];
-			}
-			if (i == 0) {
-				firstChainIndex = chainIndex;
-			} else if (chainIndex != firstChainIndex) {
-				sameChain = false;
-				break;
-			}
-		}
-
-		if (sameChain && firstChainIndex >= 0 && firstChainIndex < static_cast<int>(straightChains.size())) {
-			const StraightChainInfo& chain = straightChains[firstChainIndex];
-			if (chain.horizontal || chain.vertical) {
-				taperAlignmentAvailable = true;
-				taperAlignment = chain.alignment;
-				taperOrientation = chain.horizontal ? "horizontal" : "vertical";
-			}
-		}
-	}
-
-	out << ",\"taperAlignmentAvailable\":" << (taperAlignmentAvailable ? "true" : "false");
-	if (taperAlignmentAvailable) {
-		out << ",\"taperAlignment\":\"" << JsonEscape(taperAlignment) << "\""
-			<< ",\"taperOrientation\":\"" << JsonEscape(taperOrientation) << "\"";
-	}
-	out << ",\"canToggleTerminalStyle\":" << (canToggleTerminalStyle ? "true" : "false")
-		<< ",\"terminalStyle\":\"" << JsonEscape(terminalStyle) << "\"";
+	out << "]"
+		<< ",\"taperAlignmentAvailable\":false"
+		<< ",\"canToggleTerminalStyle\":false"
+		<< ",\"terminalStyle\":\"straight\"";
 
 	if (selectedSegmentIndices.size() == 1) {
 		const int selectedIndex = selectedSegmentIndices[0];
@@ -9115,6 +9657,10 @@ bool DuctworkGeometry::RevertSelectedEmoryToCenterlines(std::string& outMessage)
 
 	RepairVisibleFragmentSourceIdsFromBackups();
 
+	std::map<std::string, std::vector<AIArtHandle> > backupsBySourceId;
+	std::map<std::string, std::vector<EmorySourceIdCandidate> > fragmentsBySourceId;
+	BuildRevertCenterlineIndex(backupsBySourceId, fragmentsBySourceId);
+
 	std::vector<AIArtHandle> selection;
 	DuctworkSelection::CollectSelectedPaths(selection);
 	if (selection.empty()) {
@@ -9151,9 +9697,8 @@ bool DuctworkGeometry::RevertSelectedEmoryToCenterlines(std::string& outMessage)
 				if (sourceIt->empty()) {
 					continue;
 				}
-				AIArtHandle sourceArt = nullptr;
-				DuctworkPath sourcePath;
-				if (SourceIdHasBackupCenterline(*sourceIt) || FindSourceArtForSourceId(*sourceIt, sourceArt, sourcePath)) {
+				if (backupsBySourceId.find(*sourceIt) != backupsBySourceId.end() ||
+					fragmentsBySourceId.find(*sourceIt) != fragmentsBySourceId.end()) {
 					sourceIdSet.insert(*sourceIt);
 					resolvedRestoreSource = true;
 				}
@@ -9234,7 +9779,11 @@ bool DuctworkGeometry::RevertSelectedEmoryToCenterlines(std::string& outMessage)
 	std::vector<AIArtHandle> sourceSelection;
 	for (size_t sourceIndex = 0; sourceIndex < sourceIds.size(); ++sourceIndex) {
 		std::vector<AIArtHandle> healedSourceArts;
-		if (RestoreBackupCenterlinesForSourceId(sourceIds[sourceIndex], healedSourceArts)) {
+
+		std::map<std::string, std::vector<AIArtHandle> >::const_iterator backupIt =
+			backupsBySourceId.find(sourceIds[sourceIndex]);
+		if (backupIt != backupsBySourceId.end() &&
+			RestoreBackupCenterlinesFromFragments(backupIt->second, fragmentsBySourceId[sourceIds[sourceIndex]], healedSourceArts)) {
 			std::ostringstream logStream;
 			logStream << "Emory revert-restore-backup sourceId=" << sourceIds[sourceIndex]
 				<< " restoredArts=" << healedSourceArts.size();
@@ -9246,8 +9795,16 @@ bool DuctworkGeometry::RevertSelectedEmoryToCenterlines(std::string& outMessage)
 			}
 			continue;
 		}
-		if (!RestoreStoredOriginalCenterlineForSourceId(sourceIds[sourceIndex], healedSourceArts)) {
-			if (!HealSourceCenterlineFragmentsForSourceId(sourceIds[sourceIndex], healedSourceArts)) {
+
+		std::map<std::string, std::vector<EmorySourceIdCandidate> >::iterator fragmentIt =
+			fragmentsBySourceId.find(sourceIds[sourceIndex]);
+		if (fragmentIt == fragmentsBySourceId.end()) {
+			DuctworkLog::Write("Emory revert-restore-failed sourceId=" + sourceIds[sourceIndex]);
+			continue;
+		}
+
+		if (!RestoreStoredOriginalCenterlineFragments(fragmentIt->second, healedSourceArts)) {
+			if (!HealSourceCenterlineFragments(fragmentIt->second, healedSourceArts)) {
 				DuctworkLog::Write("Emory revert-restore-failed sourceId=" + sourceIds[sourceIndex]);
 				continue;
 			}
@@ -9262,22 +9819,9 @@ bool DuctworkGeometry::RevertSelectedEmoryToCenterlines(std::string& outMessage)
 			DuctworkLog::Write(logStream.str());
 		}
 
-		std::vector<EmorySourceIdCandidate> finalFragments;
-		if (CollectSourceCenterlineFragmentsForSourceId(sourceIds[sourceIndex], finalFragments) && !finalFragments.empty()) {
-			std::ostringstream logStream;
-			logStream << "Emory revert-final-fragments sourceId=" << sourceIds[sourceIndex]
-				<< " fragmentCount=" << finalFragments.size();
-			DuctworkLog::Write(logStream.str());
-			for (size_t fragmentIndex = 0; fragmentIndex < finalFragments.size(); ++fragmentIndex) {
-				if (finalFragments[fragmentIndex].art) {
-					sourceSelection.push_back(finalFragments[fragmentIndex].art);
-				}
-			}
-		} else {
-			for (size_t artIndex = 0; artIndex < healedSourceArts.size(); ++artIndex) {
-				if (healedSourceArts[artIndex]) {
-					sourceSelection.push_back(healedSourceArts[artIndex]);
-				}
+		for (size_t artIndex = 0; artIndex < healedSourceArts.size(); ++artIndex) {
+			if (healedSourceArts[artIndex]) {
+				sourceSelection.push_back(healedSourceArts[artIndex]);
 			}
 		}
 	}
@@ -9319,6 +9863,222 @@ bool DuctworkGeometry::RevertSelectedEmoryToCenterlines(std::string& outMessage)
 	}
 	outMessage = message.str();
 	return true;
+}
+
+bool DuctworkGeometry::SelectSelectedEmoryCenterlines(std::string& outMessage)
+{
+	outMessage = "Select Emory ductwork or its source centerline first.";
+	if (!sAIArt) {
+		outMessage = "Illustrator SDK is not available.";
+		return false;
+	}
+
+	std::set<std::string> sourceIds;
+	if (!CollectSelectedEmorySourceIds(sourceIds) || sourceIds.empty()) {
+		return false;
+	}
+
+	std::vector<AIArtHandle> centerlineSelection;
+	std::set<AIArtHandle> seenCenterlines;
+	size_t shownCenterlines = 0;
+
+	for (std::set<std::string>::const_iterator it = sourceIds.begin(); it != sourceIds.end(); ++it) {
+		std::vector<EmorySourceIdCandidate> fragments;
+		if (!CollectSourceCenterlineFragmentsForSourceId(*it, fragments) || fragments.empty()) {
+			AIArtHandle sourceArt = nullptr;
+			DuctworkPath sourcePath;
+			if (!FindSourceArtForSourceId(*it, sourceArt, sourcePath) || !sourceArt) {
+				continue;
+			}
+			if (IsCenterlineHidden(sourceArt)) {
+				SetCenterlineHidden(sourceArt, false);
+				++shownCenterlines;
+			}
+			if (seenCenterlines.insert(sourceArt).second) {
+				centerlineSelection.push_back(sourceArt);
+			}
+			continue;
+		}
+
+		for (size_t fragmentIndex = 0; fragmentIndex < fragments.size(); ++fragmentIndex) {
+			AIArtHandle sourceArt = fragments[fragmentIndex].art;
+			if (!sourceArt) {
+				continue;
+			}
+			if (IsCenterlineHidden(sourceArt)) {
+				SetCenterlineHidden(sourceArt, false);
+				++shownCenterlines;
+			}
+			if (seenCenterlines.insert(sourceArt).second) {
+				centerlineSelection.push_back(sourceArt);
+			}
+		}
+	}
+
+	if (centerlineSelection.empty()) {
+		return false;
+	}
+
+	ClearSelectionInternal();
+	SelectArtListInternal(centerlineSelection);
+
+	std::ostringstream message;
+	message << "Selected " << centerlineSelection.size() << " centerline";
+	if (centerlineSelection.size() != 1) {
+		message << "s";
+	}
+	message << " from " << sourceIds.size() << " Emory run";
+	if (sourceIds.size() != 1) {
+		message << "s";
+	}
+	if (shownCenterlines > 0) {
+		message << " and showed " << shownCenterlines << " hidden centerline";
+		if (shownCenterlines != 1) {
+			message << "s";
+		}
+	}
+	message << ".";
+	outMessage = message.str();
+	return true;
+}
+
+bool DuctworkGeometry::PurgeSelectedEmoryState(std::string& outMessage)
+{
+	outMessage = "Select one or more Emory centerlines or generated Emory ductwork pieces first.";
+	if (!sAIArt) {
+		outMessage = "Illustrator SDK is not available.";
+		return false;
+	}
+
+	std::vector<AIArtHandle> selection;
+	DuctworkSelection::CollectSelectedPaths(selection);
+	if (selection.empty()) {
+		return false;
+	}
+
+	std::set<std::string> sourceIds;
+	std::vector<AIArtHandle> directCenterlineSelection;
+	std::set<AIArtHandle> seenCenterlines;
+
+	for (size_t i = 0; i < selection.size(); ++i) {
+		AIArtHandle art = selection[i];
+		if (!art) {
+			continue;
+		}
+
+		if (IsGeneratedEmoryArtInternal(art)) {
+			std::set<std::string> associatedSourceIds;
+			CollectArtAssociatedSourceIds(art, associatedSourceIds);
+			sourceIds.insert(associatedSourceIds.begin(), associatedSourceIds.end());
+			continue;
+		}
+
+		DuctworkPath path;
+		if (!BuildProcessPathForArt(art, path) ||
+			!DuctworkGeometry::IsCenterlineCandidate(path.art, path.points, path.closed, path.layerName)) {
+			continue;
+		}
+
+		if (seenCenterlines.insert(art).second) {
+			directCenterlineSelection.push_back(art);
+		}
+
+		std::string sourceId;
+		if (!DuctworkMetadata::GetString(art, kEmorySourceIdKey, sourceId) || sourceId.empty()) {
+			sourceId = ReadEmorySourceIdFromNote(art);
+		}
+		if (!sourceId.empty()) {
+			sourceIds.insert(sourceId);
+		}
+	}
+
+	if (sourceIds.empty() && directCenterlineSelection.empty()) {
+		return false;
+	}
+
+	std::map<std::string, std::vector<AIArtHandle> > backupsBySourceId;
+	std::map<std::string, std::vector<EmorySourceIdCandidate> > fragmentsBySourceId;
+	BuildRevertCenterlineIndex(backupsBySourceId, fragmentsBySourceId);
+
+	std::vector<std::string> sourceIdList(sourceIds.begin(), sourceIds.end());
+	const size_t removedGenerated = DeleteGeneratedEmoryBodies(sourceIdList);
+
+	size_t removedBackups = 0;
+	size_t clearedCenterlines = 0;
+	std::vector<AIArtHandle> centerlineSelection;
+	std::set<AIArtHandle> selectedOutput;
+
+	for (std::set<std::string>::const_iterator sourceIt = sourceIds.begin();
+		sourceIt != sourceIds.end();
+		++sourceIt) {
+		std::map<std::string, std::vector<AIArtHandle> >::iterator backupIt = backupsBySourceId.find(*sourceIt);
+		if (backupIt != backupsBySourceId.end()) {
+			for (size_t i = 0; i < backupIt->second.size(); ++i) {
+				AIArtHandle backupArt = backupIt->second[i];
+				if (!backupArt) {
+					continue;
+				}
+				ClearAllEmoryMetadataInternal(backupArt);
+				sAIArt->SetArtUserAttr(backupArt, kArtLocked | kArtHidden, 0);
+				if (sAIArt->DisposeArt(backupArt) == kNoErr) {
+					++removedBackups;
+				}
+			}
+		}
+
+		std::map<std::string, std::vector<EmorySourceIdCandidate> >::iterator fragmentIt =
+			fragmentsBySourceId.find(*sourceIt);
+		if (fragmentIt == fragmentsBySourceId.end()) {
+			continue;
+		}
+		for (size_t i = 0; i < fragmentIt->second.size(); ++i) {
+			AIArtHandle sourceArt = fragmentIt->second[i].art;
+			if (!sourceArt) {
+				continue;
+			}
+			ClearAllEmoryMetadataInternal(sourceArt);
+			UngroupAncestorGroupsRecursive(sourceArt);
+			if (selectedOutput.insert(sourceArt).second) {
+				centerlineSelection.push_back(sourceArt);
+			}
+			++clearedCenterlines;
+		}
+	}
+
+	for (size_t i = 0; i < directCenterlineSelection.size(); ++i) {
+		AIArtHandle sourceArt = directCenterlineSelection[i];
+		if (!sourceArt) {
+			continue;
+		}
+		ClearAllEmoryMetadataInternal(sourceArt);
+		UngroupAncestorGroupsRecursive(sourceArt);
+		if (selectedOutput.insert(sourceArt).second) {
+			centerlineSelection.push_back(sourceArt);
+		}
+		++clearedCenterlines;
+	}
+
+	if (!centerlineSelection.empty()) {
+		ClearSelectionInternal();
+		SelectArtListInternal(centerlineSelection);
+	}
+
+	std::ostringstream message;
+	message << "Purged Emory state from " << clearedCenterlines << " centerline";
+	if (clearedCenterlines != 1) {
+		message << "s";
+	}
+	message << ", removed " << removedGenerated << " generated piece";
+	if (removedGenerated != 1) {
+		message << "s";
+	}
+	message << " and " << removedBackups << " hidden backup";
+	if (removedBackups != 1) {
+		message << "s";
+	}
+	message << ".";
+	outMessage = message.str();
+	return clearedCenterlines > 0 || removedGenerated > 0 || removedBackups > 0;
 }
 
 bool DuctworkGeometry::SetSelectedEmoryTaperAlignment(const std::string& alignment, std::string& outMessage)
@@ -9891,12 +10651,14 @@ bool DuctworkGeometry::ClearSelectedEmoryStartSegment(std::string& outMessage)
 
 bool DuctworkGeometry::ApplySelectedEmorySegmentWidth(double newWidth, std::string& outMessage)
 {
+	auto widthApplyStart = std::chrono::steady_clock::now();
 	outMessage = "Select one or more Emory duct segments first.";
 	if (!sAIArt) {
 		outMessage = "Illustrator SDK is not available.";
 		return false;
 	}
 
+	// Repair/normalize are needed to ensure consistent source IDs
 	RepairVisibleFragmentSourceIdsFromBackups();
 	NormalizeDuplicateEmorySourceIds();
 
@@ -9959,18 +10721,7 @@ bool DuctworkGeometry::ApplySelectedEmorySegmentWidth(double newWidth, std::stri
 		return false;
 	}
 
-	{
-		std::ostringstream logStream;
-		logStream << "Emory width-apply raw-selection count=" << selectedSegments.size()
-			<< " newWidth=" << newWidth;
-		for (size_t i = 0; i < selectedSegments.size(); ++i) {
-			logStream << " [" << i
-				<< " sourceId=" << selectedSegments[i].sourceId
-				<< " segmentIndex=" << selectedSegments[i].segmentIndex
-				<< "]";
-		}
-		DuctworkLog::Write(logStream.str());
-	}
+	// PERF: Removed verbose per-segment logging
 
 	{
 		std::set<std::string> selectedSourceIdsToLocalize;
@@ -9989,8 +10740,12 @@ bool DuctworkGeometry::ApplySelectedEmorySegmentWidth(double newWidth, std::stri
 		return false;
 	}
 
+	{
+		auto collectMs = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - widthApplyStart).count();
+		DuctworkLog::WriteAlways("[PERF] Width-apply: collect+localize=" + std::to_string(collectMs) + "ms states=" + std::to_string(states.size()));
+	}
+
 	std::map<int, std::vector<int> > selectedIndicesByState;
-	std::set<std::string> selectedSourceIds;
 	std::vector<std::string> sourceIds;
 	std::vector<DuctworkPath> regeneratePaths;
 	size_t totalSelectedCount = 0;
@@ -10013,28 +10768,7 @@ bool DuctworkGeometry::ApplySelectedEmorySegmentWidth(double newWidth, std::stri
 		selectedIndicesByState[stateIndex].push_back(selectedSegments[i].segmentIndex);
 	}
 
-	{
-		std::ostringstream logStream;
-		logStream << "Emory width-apply mapped-selection stateCount=" << selectedIndicesByState.size();
-		for (std::map<int, std::vector<int> >::const_iterator it = selectedIndicesByState.begin(); it != selectedIndicesByState.end(); ++it) {
-			logStream << " [stateIndex=" << it->first;
-			if (it->first >= 0 && it->first < static_cast<int>(states.size())) {
-				logStream << " sourceId=" << states[it->first].sourceId
-					<< " start=" << states[it->first].startSegmentIndex
-					<< " explicitStart=" << (states[it->first].hasExplicitStart ? 1 : 0)
-					<< " segmentCount=" << states[it->first].segmentCount;
-			}
-			logStream << " selected=";
-			for (size_t i = 0; i < it->second.size(); ++i) {
-				if (i > 0) {
-					logStream << ",";
-				}
-				logStream << it->second[i];
-			}
-			logStream << "]";
-		}
-		DuctworkLog::Write(logStream.str());
-	}
+	// PERF: Removed verbose mapped-selection logging
 
 	for (std::map<int, std::vector<int> >::iterator it = selectedIndicesByState.begin(); it != selectedIndicesByState.end(); ++it) {
 		std::vector<int>& selectedSegmentIndices = it->second;
@@ -10043,7 +10777,6 @@ bool DuctworkGeometry::ApplySelectedEmorySegmentWidth(double newWidth, std::stri
 		totalSelectedCount += selectedSegmentIndices.size();
 
 		EmorySourceState& state = states[it->first];
-		selectedSourceIds.insert(state.sourceId);
 		const int segmentCount = state.segmentCount;
 		if (segmentCount == 0) {
 			outMessage = "One of the selected runs has no valid segments.";
@@ -10057,46 +10790,10 @@ bool DuctworkGeometry::ApplySelectedEmorySegmentWidth(double newWidth, std::stri
 		}
 	}
 
+	// PERF: Removed verbose before/after cascade logging
 	for (std::map<int, std::vector<int> >::const_iterator it = selectedIndicesByState.begin(); it != selectedIndicesByState.end(); ++it) {
-		{
-			std::ostringstream logStream;
-			logStream << "Emory width-apply before-cascade sourceId=" << states[it->first].sourceId
-				<< " start=" << states[it->first].startSegmentIndex
-				<< " widths=";
-			for (size_t widthIndex = 0; widthIndex < states[it->first].widths.size(); ++widthIndex) {
-				if (widthIndex > 0) {
-					logStream << ",";
-				}
-				logStream << states[it->first].widths[widthIndex];
-			}
-			logStream << " selected=";
-			for (size_t i = 0; i < it->second.size(); ++i) {
-				if (i > 0) {
-					logStream << ",";
-				}
-				logStream << it->second[i];
-			}
-			DuctworkLog::Write(logStream.str());
-		}
 		ApplySelectedWidthToPathState(states[it->first], it->second, newWidth);
-		{
-			std::ostringstream logStream;
-			logStream << "Emory width-apply after-cascade sourceId=" << states[it->first].sourceId
-				<< " start=" << states[it->first].startSegmentIndex
-				<< " widths=";
-			for (size_t widthIndex = 0; widthIndex < states[it->first].widths.size(); ++widthIndex) {
-				if (widthIndex > 0) {
-					logStream << ",";
-				}
-				logStream << states[it->first].widths[widthIndex];
-			}
-			DuctworkLog::Write(logStream.str());
-		}
 	}
-
-	std::vector<DuctworkConnection> connections;
-	CollectEmoryNetworkConnections(states, connections);
-	CascadeConnectedBranchWidths(states, connections);
 
 	std::set<std::string> affectedSourceIds;
 	for (size_t i = 0; i < states.size(); ++i) {
@@ -10109,6 +10806,20 @@ bool DuctworkGeometry::ApplySelectedEmorySegmentWidth(double newWidth, std::stri
 	if (affectedSourceIds.empty()) {
 		outMessage = "No Emory runs were updated from the current selection.";
 		return false;
+	}
+
+	// Preserve the current visible stroke for each affected run before rebuild.
+	// Width changes should not silently normalize only some runs back to the
+	// computed default stroke width.
+	for (size_t i = 0; i < states.size(); ++i) {
+		const EmorySourceState& state = states[i];
+		if (affectedSourceIds.find(state.sourceId) == affectedSourceIds.end() ||
+			state.sourceId.empty() ||
+			state.sourceStrokeWidth <= 0.0) {
+			continue;
+		}
+		WriteStoredSourceStrokeWidthForSourceId(state.sourceId, state.sourceStrokeWidth);
+		WriteStoredSourceStrokeExplicitForSourceId(state.sourceId, true);
 	}
 
 	std::set<std::string> backupAffectedSourceIds;
@@ -10144,32 +10855,13 @@ bool DuctworkGeometry::ApplySelectedEmorySegmentWidth(double newWidth, std::stri
 		}
 	}
 
-	std::vector<EmorySourceState> finalStates;
-	std::map<std::string, int> finalStateIndexBySourceId;
-	if (!CollectEmorySourceStates(finalStates, finalStateIndexBySourceId)) {
-		outMessage = "Unable to rebuild the updated Emory source centerlines.";
-		return false;
-	}
+	// PERF: Reuse the existing states with updated widths instead of calling
+	// CollectEmorySourceStates a second time (was a full document scan).
+	// Re-map the selected segments using the already-collected states.
+	std::map<int, std::vector<int> > finalSelectedIndicesByState = selectedIndicesByState;
 
-	std::map<int, std::vector<int> > finalSelectedIndicesByState;
-	for (size_t i = 0; i < selectedSegments.size(); ++i) {
-		int stateIndex = -1;
-		if (!FindBestStateIndexForGeneratedArt(selectedSegments[i].art,
-			kEmoryRoleSegment,
-			selectedSegments[i].sourceId,
-			finalStates,
-			stateIndex) &&
-			!FindBestStateIndexForGeneratedArtLoose(selectedSegments[i].art,
-				kEmoryRoleSegment,
-				finalStates,
-				stateIndex)) {
-			continue;
-		}
-		finalSelectedIndicesByState[stateIndex].push_back(selectedSegments[i].segmentIndex);
-	}
-
-	for (size_t i = 0; i < finalStates.size(); ++i) {
-		EmorySourceState& state = finalStates[i];
+	for (size_t i = 0; i < states.size(); ++i) {
+		EmorySourceState& state = states[i];
 		if (affectedSourceIds.find(state.sourceId) == affectedSourceIds.end() || !state.art || state.widths.empty()) {
 			continue;
 		}
@@ -10185,13 +10877,25 @@ bool DuctworkGeometry::ApplySelectedEmorySegmentWidth(double newWidth, std::stri
 	std::sort(sourceIds.begin(), sourceIds.end());
 	sourceIds.erase(std::unique(sourceIds.begin(), sourceIds.end()), sourceIds.end());
 	std::vector<std::string> deleteSourceIdList(deleteSourceIds.begin(), deleteSourceIds.end());
-	DeleteGeneratedEmoryBodies(deleteSourceIdList);
-	EmoryBodyStats stats = GenerateEmoryBodies(regeneratePaths);
-	SelectGeneratedSegmentsByStateMap(finalStates, finalSelectedIndicesByState);
 
-	const size_t cascadedRunCount = sourceIds.size() > selectedSourceIds.size()
-		? (sourceIds.size() - selectedSourceIds.size())
-		: 0;
+	auto t0 = std::chrono::steady_clock::now();
+	DeleteGeneratedEmoryBodies(deleteSourceIdList);
+	auto t1 = std::chrono::steady_clock::now();
+	EmoryBodyStats stats = GenerateEmoryBodies(regeneratePaths);
+	auto t2 = std::chrono::steady_clock::now();
+	SelectGeneratedSegmentsByStateMap(states, finalSelectedIndicesByState);
+	auto t3 = std::chrono::steady_clock::now();
+
+	{
+		const auto deleteMs = std::chrono::duration_cast<std::chrono::milliseconds>(t1 - t0).count();
+		const auto generateMs = std::chrono::duration_cast<std::chrono::milliseconds>(t2 - t1).count();
+		const auto selectMs = std::chrono::duration_cast<std::chrono::milliseconds>(t3 - t2).count();
+		std::ostringstream perf;
+		perf << "[PERF] Width-apply: delete=" << deleteMs << "ms generate=" << generateMs
+			<< "ms select=" << selectMs << "ms paths=" << regeneratePaths.size()
+			<< " segments=" << stats.segmentsCreated << " connectors=" << stats.connectorsCreated;
+		DuctworkLog::Write(perf.str());
+	}
 
 	std::ostringstream message;
 	message << "Updated " << totalSelectedCount << " segment";
@@ -10199,12 +10903,6 @@ bool DuctworkGeometry::ApplySelectedEmorySegmentWidth(double newWidth, std::stri
 		message << "s";
 	}
 	message << " to width " << newWidth;
-	if (cascadedRunCount > 0) {
-		message << " and cascaded into " << cascadedRunCount << " connected branch run";
-		if (cascadedRunCount != 1) {
-			message << "s";
-		}
-	}
 	message
 		<< ". Rebuilt " << stats.segmentsCreated << " segments and "
 		<< stats.connectorsCreated << " connectors.";

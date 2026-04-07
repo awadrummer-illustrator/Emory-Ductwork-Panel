@@ -305,12 +305,14 @@
     let emoryWidthApplyInFlight = false;
     let emoryWidthLastApplied = null;
     let emoryWidthRefreshPending = false;
+    let emorySelectionRefreshTimer = null;
 
     function onAfterSelectionChanged() {
         if (isCepSuspended()) return;
         if (!AUTO_SELECTION_REFRESH_ENABLED) return;
         updateSkipSelectionRefresh().then(() => {
             if (skipSelectionRefresh) return;
+            scheduleEmorySelectionRefresh(false);
             scheduleSkipOrthoRefresh();
         }).catch(() => {});
     }
@@ -320,6 +322,7 @@
         if (!AUTO_SELECTION_REFRESH_ENABLED) return;
         updateSkipSelectionRefresh().then(() => {
             if (!skipSelectionRefresh) {
+                scheduleEmorySelectionRefresh(true);
                 scheduleSkipOrthoRefresh();
             }
         }).catch(() => {});
@@ -335,6 +338,7 @@
         if (!AUTO_SELECTION_REFRESH_ENABLED) return;
         updateSkipSelectionRefresh().then(() => {
             if (skipSelectionRefresh) return;
+            scheduleEmorySelectionRefresh(false);
             scheduleSkipOrthoRefresh();
         }).catch(() => {});
     }
@@ -994,20 +998,31 @@
             if (skipSelectionRefresh) return;
             if (AUTO_SELECTION_REFRESH_MODE === 'skip-ortho') {
                 refreshSkipOrthoState().catch(() => { });
-                refreshEmorySelectionState(false).catch(() => { });
                 return;
             }
             if (AUTO_SELECTION_REFRESH_MODE === 'skip-ortho+rotation') {
                 refreshSkipOrthoState().catch(() => { });
                 refreshRotationOverrideState().catch(() => { });
-                refreshEmorySelectionState(false).catch(() => { });
                 return;
             }
             refreshSkipOrthoState().catch(() => { });
             refreshRotationOverrideState().catch(() => { });
             refreshSelectionTransformState().catch(() => { });
-            refreshEmorySelectionState(false).catch(() => { });
         }, 150);
+    }
+
+    function scheduleEmorySelectionRefresh(force) {
+        if (!AUTO_SELECTION_REFRESH_ENABLED) return;
+        if (isCepSuspended()) return;
+        if (emorySelectionRefreshTimer) {
+            clearTimeout(emorySelectionRefreshTimer);
+            emorySelectionRefreshTimer = null;
+        }
+        emorySelectionRefreshTimer = setTimeout(function () {
+            emorySelectionRefreshTimer = null;
+            if (skipSelectionRefresh) return;
+            refreshEmorySelectionState(!!force).catch(function () { });
+        }, force ? 0 : 20);
     }
 
     async function updateSkipSelectionRefresh() {
@@ -1386,6 +1401,7 @@
         } catch (e) {
             setEmoryWidthStatus('Unable to mark the cascade start: ' + e.message, true);
         } finally {
+            scheduleEmorySelectionRefresh(true);
             scheduleSkipOrthoRefresh();
             setEmoryStartBtn.disabled = false;
         }
@@ -3284,7 +3300,7 @@
                     if (skipSelectionRefresh) return;
                     refreshSelectionTransformState().catch(function() {});
                     refreshRotationOverrideState().catch(function() {});
-                    refreshEmorySelectionState(true).catch(function() {});
+                    scheduleEmorySelectionRefresh(true);
                 }).catch(function() {});
             });
 

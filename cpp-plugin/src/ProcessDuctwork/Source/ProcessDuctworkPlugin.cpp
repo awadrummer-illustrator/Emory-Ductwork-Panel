@@ -24,6 +24,7 @@
 #include <sstream>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 
 namespace
 {
@@ -303,25 +304,30 @@ namespace
 
 	bool SavePreOrthoCopy(AIDocumentHandle document)
 	{
+		StepTimer timer("PreOrthoBackup");
 		if (!sAIDocument || !sAIFilePath || !sAIFileFormat || !document) {
+			timer.LogElapsed("unavailable");
 			return false;
 		}
 
 		ai::FilePath fileSpec;
 		if (sAIDocument->GetDocumentFileSpecificationFromHandle(document, fileSpec) != kNoErr) {
 			DuctworkLog::Write("PreOrtho: no document file path");
+			timer.LogElapsed("no-document-path");
 			return false;
 		}
 
 		ai::UnicodeString fullPath;
 		if (sAIFilePath->GetFullPath(fileSpec, false, fullPath) != kNoErr) {
 			DuctworkLog::Write("PreOrtho: failed to read full path");
+			timer.LogElapsed("no-full-path");
 			return false;
 		}
 
 		std::filesystem::path sourcePath(fullPath.as_UTF8().c_str());
 		if (sourcePath.empty()) {
 			DuctworkLog::Write("PreOrtho: empty source path");
+			timer.LogElapsed("empty-source-path");
 			return false;
 		}
 
@@ -329,18 +335,34 @@ namespace
 			sourcePath.parent_path() /
 			(sourcePath.stem().string() + "_preortho" + sourcePath.extension().string());
 
+		std::error_code targetExistsError;
+		const bool targetExists = std::filesystem::exists(targetPath, targetExistsError);
+		if (!targetExistsError && targetExists) {
+			std::error_code sourceTimeError;
+			std::error_code targetTimeError;
+			const std::filesystem::file_time_type sourceTime = std::filesystem::last_write_time(sourcePath, sourceTimeError);
+			const std::filesystem::file_time_type targetTime = std::filesystem::last_write_time(targetPath, targetTimeError);
+			if (!sourceTimeError && !targetTimeError && targetTime >= sourceTime) {
+				DuctworkLog::Write("PreOrtho: backup current " + targetPath.string());
+				timer.LogElapsed("skipped-current");
+				return true;
+			}
+		}
+
 		ai::UnicodeString targetPathStr = ai::UnicodeString::FromUTF8(targetPath.string());
 		ai::FilePath targetFile(targetPathStr);
 
 		AIFileFormatHandle formatHandle = nullptr;
 		if (sAIDocument->GetDocumentFileFormat(&formatHandle) != kNoErr || !formatHandle) {
 			DuctworkLog::Write("PreOrtho: failed to get document format");
+			timer.LogElapsed("no-format");
 			return false;
 		}
 
 		const char* formatName = nullptr;
 		if (sAIFileFormat->GetFileFormatName(formatHandle, &formatName) != kNoErr || !formatName) {
 			DuctworkLog::Write("PreOrtho: failed to get format name");
+			timer.LogElapsed("no-format-name");
 			return false;
 		}
 
@@ -348,10 +370,12 @@ namespace
 		if (err != kNoErr) {
 			DuctworkLog::Write("PreOrtho: write failed");
 			DuctworkLog::Error("PreOrtho WriteDocument", err);
+			timer.LogElapsed("write-failed");
 			return false;
 		}
 
 		DuctworkLog::Write("PreOrtho: saved copy " + targetPath.string());
+		timer.LogElapsed("saved");
 		return true;
 	}
 
@@ -1020,6 +1044,7 @@ ASErr ProcessDuctworkPlugin::Message(char* caller, char* selector, void* message
 						out << "{\"ok\":false,\"message\":\"Process failed.\"}";
 					}
 					msg->outParam = ai::UnicodeString::FromUTF8(out.str());
+					SendEventToPanel("com.emory.operation.complete", out.str().c_str());
 					return kNoErr;
 				}
 
@@ -1030,6 +1055,7 @@ ASErr ProcessDuctworkPlugin::Message(char* caller, char* selector, void* message
 					out << "{\"ok\":" << (ok ? "true" : "false")
 						<< ",\"message\":\"" << messageText << "\"}";
 					msg->outParam = ai::UnicodeString::FromUTF8(out.str());
+					SendEventToPanel("com.emory.operation.complete", out.str().c_str());
 					return kNoErr;
 				}
 
@@ -1040,6 +1066,19 @@ ASErr ProcessDuctworkPlugin::Message(char* caller, char* selector, void* message
 					out << "{\"ok\":" << (ok ? "true" : "false")
 						<< ",\"message\":\"" << messageText << "\"}";
 					msg->outParam = ai::UnicodeString::FromUTF8(out.str());
+					SendEventToPanel("com.emory.operation.complete", out.str().c_str());
+					return kNoErr;
+				}
+
+				if (action == "set-terminal-segment-style") {
+					const std::string targetStyle = data.find("value") != data.end() ? data.find("value")->second : std::string();
+					std::string messageText;
+					const bool ok = DuctworkGeometry::SetSelectedEmoryTerminalSegmentStyle(targetStyle, messageText);
+					std::ostringstream out;
+					out << "{\"ok\":" << (ok ? "true" : "false")
+						<< ",\"message\":\"" << messageText << "\"}";
+					msg->outParam = ai::UnicodeString::FromUTF8(out.str());
+					SendEventToPanel("com.emory.operation.complete", out.str().c_str());
 					return kNoErr;
 				}
 
@@ -1057,6 +1096,29 @@ ASErr ProcessDuctworkPlugin::Message(char* caller, char* selector, void* message
 					out << "{\"ok\":" << (ok ? "true" : "false")
 						<< ",\"message\":\"" << messageText << "\"}";
 					msg->outParam = ai::UnicodeString::FromUTF8(out.str());
+					SendEventToPanel("com.emory.operation.complete", out.str().c_str());
+					return kNoErr;
+				}
+
+				if (action == "select-emory-centerlines") {
+					std::string messageText;
+					const bool ok = DuctworkGeometry::SelectSelectedEmoryCenterlines(messageText);
+					std::ostringstream out;
+					out << "{\"ok\":" << (ok ? "true" : "false")
+						<< ",\"message\":\"" << messageText << "\"}";
+					msg->outParam = ai::UnicodeString::FromUTF8(out.str());
+					SendEventToPanel("com.emory.operation.complete", out.str().c_str());
+					return kNoErr;
+				}
+
+				if (action == "purge-emory-state") {
+					std::string messageText;
+					const bool ok = DuctworkGeometry::PurgeSelectedEmoryState(messageText);
+					std::ostringstream out;
+					out << "{\"ok\":" << (ok ? "true" : "false")
+						<< ",\"message\":\"" << messageText << "\"}";
+					msg->outParam = ai::UnicodeString::FromUTF8(out.str());
+					SendEventToPanel("com.emory.operation.complete", out.str().c_str());
 					return kNoErr;
 				}
 
@@ -1212,6 +1274,15 @@ ASErr ProcessDuctworkPlugin::Message(char* caller, char* selector, void* message
 	}
 
 	return error;
+}
+
+void ProcessDuctworkPlugin::SendEventToPanel(const char* eventId, const char* jsonData)
+{
+	// DISABLED FOR TESTING - suspected crash source
+	// TODO: Re-enable once crash is ruled out
+	(void)eventId;
+	(void)jsonData;
+	return;
 }
 
 ASErr ProcessDuctworkPlugin::AddMenus(SPInterfaceMessage* message)
@@ -2048,20 +2119,33 @@ ASErr ProcessDuctworkPlugin::ProcessDuctwork(const ProcessDuctworkOptions& optio
 			DuctworkLog::Write("Thermostat endpoints snapped");
 		}
 
+		std::vector<AIArtHandle> allPathArt;
+		CollectDuctworkLayerPaths(allPathArt);
+		std::unordered_set<AIArtHandle> selectedArtHandles;
+		for (size_t i = 0; i < ductworkPaths.size(); ++i) {
+			if (ductworkPaths[i].art) {
+				selectedArtHandles.insert(ductworkPaths[i].art);
+			}
+		}
+
+		std::vector<DuctworkPath> allPaths;
+		std::vector<DuctworkPath> orthoDocumentContextPaths;
+		allPaths.reserve(allPathArt.size());
+		orthoDocumentContextPaths.reserve(allPathArt.size());
+		for (size_t i = 0; i < allPathArt.size(); ++i) {
+			DuctworkPath entry;
+			if (!BuildProcessPathEntry(allPathArt[i], entry)) {
+				continue;
+			}
+			allPaths.push_back(entry);
+			if (selectedArtHandles.find(entry.art) == selectedArtHandles.end()) {
+				orthoDocumentContextPaths.push_back(entry);
+			}
+		}
+
 		std::vector<EndpointFlags> endpointFlags;
 		if (options.skipAllBranchSegments || options.skipFinalRegisterSegment) {
 			StepTimer roleTimer("RoleMetadata");
-			std::vector<AIArtHandle> allPathArt;
-			CollectDuctworkLayerPaths(allPathArt);
-			std::vector<DuctworkPath> allPaths;
-			allPaths.reserve(allPathArt.size());
-			for (size_t i = 0; i < allPathArt.size(); ++i) {
-				DuctworkPath entry;
-				if (!BuildProcessPathEntry(allPathArt[i], entry)) {
-					continue;
-				}
-				allPaths.push_back(entry);
-			}
 			std::vector<DuctworkConnection> allConnections;
 			DuctworkConnections::FindConnections(
 				allPaths,
@@ -2096,7 +2180,7 @@ ASErr ProcessDuctworkPlugin::ProcessDuctwork(const ProcessDuctworkOptions& optio
 		}
 		StepTimer orthoTimer("Orthogonalize");
 		orthoResult = DuctworkOrtho::ApplyToPaths(ductworkPaths, 17.0,
-			options.hasRotationOverride, options.rotationOverride, preConnections,
+			options.hasRotationOverride, options.rotationOverride, preConnections, orthoDocumentContextPaths,
 			options.skipAllBranchSegments, options.skipFinalRegisterSegment);
 		orthoTimer.LogElapsed();
 		DuctworkLog::Write("Orthogonalize paths touched=" + std::to_string(orthoResult.pathsTouched) +

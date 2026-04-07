@@ -45,6 +45,39 @@ void DuctworkLog::Write(const std::string& message)
 	std::fclose(file);
 }
 
+void DuctworkLog::WriteAlways(const std::string& message)
+{
+	const char* temp = std::getenv("TEMP");
+	if (!temp || temp[0] == '\0') {
+		temp = std::getenv("TMP");
+	}
+	if (!temp || temp[0] == '\0') {
+		return;
+	}
+
+	std::string path(temp);
+	if (!path.empty()) {
+		const char last = path[path.size() - 1];
+		if (last != '\\' && last != '/') {
+			path += "\\";
+		}
+	}
+	path += "EmoryDuctwork.log";
+
+	FILE* file = nullptr;
+	if (fopen_s(&file, path.c_str(), "a") != 0 || !file) {
+		return;
+	}
+
+	std::time_t now = std::time(nullptr);
+	std::tm localTime{};
+	localtime_s(&localTime, &now);
+	char stamp[32] = { 0 };
+	std::strftime(stamp, sizeof(stamp), "%Y-%m-%d %H:%M:%S", &localTime);
+	std::fprintf(file, "[%s] %s\n", stamp, message.c_str());
+	std::fclose(file);
+}
+
 void DuctworkLog::Error(const char* label, int error)
 {
 	if (!sEnabled) {
