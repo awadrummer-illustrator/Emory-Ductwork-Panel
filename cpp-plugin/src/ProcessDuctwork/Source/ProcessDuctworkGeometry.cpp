@@ -3460,6 +3460,60 @@ namespace
 		}
 	}
 
+	bool AreConsecutiveSegmentsCollinear(const std::vector<DuctworkPoint>& points, int firstSegmentIndex, int secondSegmentIndex)
+	{
+		Vec2 firstDir;
+		Vec2 secondDir;
+		if (!BuildSegmentDirection(points, firstSegmentIndex, firstDir) ||
+			!BuildSegmentDirection(points, secondSegmentIndex, secondDir)) {
+			return false;
+		}
+		return Dot(firstDir, secondDir) >= kCollinearThreshold;
+	}
+
+	void ApplyPolylineTaperContinuityFromAnchor(const std::vector<DuctworkPoint>& points,
+		int startSegmentIndex,
+		std::vector<double>& widths)
+	{
+		if (widths.empty() || points.size() < 2 || widths.size() != points.size() - 1) {
+			return;
+		}
+
+		int clampedStartSegmentIndex = startSegmentIndex;
+		if (clampedStartSegmentIndex < 0) {
+			clampedStartSegmentIndex = 0;
+		}
+		if (clampedStartSegmentIndex >= static_cast<int>(widths.size())) {
+			clampedStartSegmentIndex = static_cast<int>(widths.size() - 1);
+		}
+
+		if (!std::isfinite(widths[clampedStartSegmentIndex]) || widths[clampedStartSegmentIndex] < kMinDuctWidth) {
+			widths[clampedStartSegmentIndex] = kMinDuctWidth;
+		}
+
+		for (int segmentIndex = clampedStartSegmentIndex + 1;
+			segmentIndex < static_cast<int>(widths.size());
+			++segmentIndex) {
+			const bool straightContinuation = AreConsecutiveSegmentsCollinear(points, segmentIndex - 1, segmentIndex);
+			double nextWidth = widths[segmentIndex - 1] * (straightContinuation ? kStraightTaperRatio : 1.0);
+			if (!std::isfinite(nextWidth) || nextWidth < kMinDuctWidth) {
+				nextWidth = kMinDuctWidth;
+			}
+			widths[segmentIndex] = nextWidth;
+		}
+
+		for (int segmentIndex = clampedStartSegmentIndex - 1;
+			segmentIndex >= 0;
+			--segmentIndex) {
+			const bool straightContinuation = AreConsecutiveSegmentsCollinear(points, segmentIndex, segmentIndex + 1);
+			double nextWidth = widths[segmentIndex + 1] * (straightContinuation ? kStraightTaperRatio : 1.0);
+			if (!std::isfinite(nextWidth) || nextWidth < kMinDuctWidth) {
+				nextWidth = kMinDuctWidth;
+			}
+			widths[segmentIndex] = nextWidth;
+		}
+	}
+
 	void ApplyDefaultStraightChainTapers(AIArtHandle sourceArt,
 		const std::vector<DuctworkPoint>& points,
 		int startSegmentIndex,
@@ -3501,6 +3555,8 @@ namespace
 			ApplyStraightChainTaperFromAnchor(chain, seedWidths, clampedStartSegmentIndex, -1, widths);
 			ApplyStraightChainTaperFromAnchor(chain, seedWidths, clampedStartSegmentIndex, 1, widths);
 		}
+
+		ApplyPolylineTaperContinuityFromAnchor(points, clampedStartSegmentIndex, widths);
 	}
 
 	bool ReadStoredSourceBodyWidth(AIArtHandle sourceArt, double& outWidth)
