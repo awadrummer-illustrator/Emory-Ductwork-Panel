@@ -6470,8 +6470,7 @@ void ClearStartSegmentIndex(AIArtHandle sourceArt)
 		EmorySourceState& branchState,
 		const PathConnectionAttachment& branchAttachment)
 	{
-		if (branchState.hasStoredSegmentWidths ||
-			trunkAttachment.segmentIndex < 0 ||
+		if (trunkAttachment.segmentIndex < 0 ||
 			trunkAttachment.segmentIndex >= static_cast<int>(trunkState.widths.size()) ||
 			branchAttachment.endpointSlot < 0 ||
 			branchState.segmentCount <= 0 ||
@@ -6487,6 +6486,11 @@ void ClearStartSegmentIndex(AIArtHandle sourceArt)
 		double inheritedRootWidth = trunkState.widths[trunkAttachment.segmentIndex] * kBranchInheritedWidthRatio;
 		if (!std::isfinite(inheritedRootWidth) || inheritedRootWidth < kMinDuctWidth) {
 			inheritedRootWidth = kMinDuctWidth;
+		}
+		if (branchState.hasStoredSegmentWidths &&
+			(branchState.hasExplicitStart ||
+				!NearlyEqual(branchState.widths[branchRootSegmentIndex], trunkState.widths[trunkAttachment.segmentIndex], 0.001))) {
+			return false;
 		}
 
 		std::vector<double> inheritedWidths(branchState.widths.size(), inheritedRootWidth);
@@ -6521,6 +6525,101 @@ void ClearStartSegmentIndex(AIArtHandle sourceArt)
 		return true;
 	}
 
+	bool SourceStateHasUnitEndpoint(const EmorySourceState& state, const std::vector<DuctworkPoint>& unitAttachmentPoints)
+	{
+		return state.path.points.size() >= 2 &&
+			!unitAttachmentPoints.empty() &&
+			(IsPointNearAny(state.path.points.front(), unitAttachmentPoints, 10.0) ||
+				IsPointNearAny(state.path.points.back(), unitAttachmentPoints, 10.0));
+	}
+
+	bool ResolveUnitTrunkSegmentIntersection(const DuctworkConnection& connection,
+		const std::vector<EmorySourceState>& states,
+		const std::vector<DuctworkPoint>& unitAttachmentPoints,
+		int& outTrunkIndex,
+		int& outBranchIndex)
+	{
+		outTrunkIndex = -1;
+		outBranchIndex = -1;
+		if (connection.type != kConnectionSegmentIntersection ||
+			connection.a < 0 || connection.a >= static_cast<int>(states.size()) ||
+			connection.b < 0 || connection.b >= static_cast<int>(states.size())) {
+			return false;
+		}
+
+		const EmorySourceState& stateA = states[connection.a];
+		const EmorySourceState& stateB = states[connection.b];
+		if (stateA.path.layerName != stateB.path.layerName ||
+			connection.segA < 0 || connection.segA >= stateA.segmentCount ||
+			connection.segB < 0 || connection.segB >= stateB.segmentCount) {
+			return false;
+		}
+
+		const bool aHasUnit = SourceStateHasUnitEndpoint(stateA, unitAttachmentPoints);
+		const bool bHasUnit = SourceStateHasUnitEndpoint(stateB, unitAttachmentPoints);
+		if (aHasUnit == bHasUnit) {
+			return false;
+		}
+
+		outTrunkIndex = aHasUnit ? connection.a : connection.b;
+		outBranchIndex = aHasUnit ? connection.b : connection.a;
+		return true;
+	}
+
+	bool ApplyInheritedWidthToBranchSegmentState(const EmorySourceState& trunkState,
+		int trunkSegmentIndex,
+		EmorySourceState& branchState,
+		int branchSegmentIndex)
+	{
+		if (trunkSegmentIndex < 0 ||
+			trunkSegmentIndex >= static_cast<int>(trunkState.widths.size()) ||
+			branchSegmentIndex < 0 ||
+			branchSegmentIndex >= static_cast<int>(branchState.widths.size())) {
+			return false;
+		}
+
+		double inheritedRootWidth = trunkState.widths[trunkSegmentIndex] * kBranchInheritedWidthRatio;
+		if (!std::isfinite(inheritedRootWidth) || inheritedRootWidth < kMinDuctWidth) {
+			inheritedRootWidth = kMinDuctWidth;
+		}
+		if (branchState.hasStoredSegmentWidths &&
+			(branchState.hasExplicitStart ||
+				!NearlyEqual(branchState.widths[branchSegmentIndex], trunkState.widths[trunkSegmentIndex], 0.001))) {
+			return false;
+		}
+
+		std::vector<double> inheritedWidths(branchState.widths.size(), inheritedRootWidth);
+		ApplyDefaultStraightChainTapers(branchState.art,
+			branchState.path.points,
+			branchSegmentIndex,
+			inheritedWidths);
+		if (branchSegmentIndex >= 0 && branchSegmentIndex < static_cast<int>(inheritedWidths.size())) {
+			inheritedWidths[branchSegmentIndex] = inheritedRootWidth;
+		}
+
+		bool changed = branchState.startSegmentIndex != branchSegmentIndex ||
+			branchState.widths.size() != inheritedWidths.size();
+		if (!changed) {
+			for (size_t i = 0; i < inheritedWidths.size(); ++i) {
+				if (!NearlyEqual(branchState.widths[i], inheritedWidths[i], 0.001)) {
+					changed = true;
+					break;
+				}
+			}
+		}
+		if (!changed) {
+			return false;
+		}
+
+		branchState.widths = inheritedWidths;
+		branchState.originalWidths = inheritedWidths;
+		branchState.defaultWidth = ResolveMaxSegmentWidth(branchState.widths, inheritedRootWidth);
+		branchState.startSegmentIndex = branchSegmentIndex;
+		branchState.hasExplicitStart = true;
+		branchState.touched = true;
+		return true;
+	}
+
 	size_t ApplyInheritedBranchWidths(std::vector<EmorySourceState>& states, const std::set<std::string>& affectedSourceIds)
 	{
 		if (states.size() < 2 || affectedSourceIds.empty()) {
@@ -6533,28 +6632,58 @@ void ClearStartSegmentIndex(AIArtHandle sourceArt)
 			return 0;
 		}
 
+		std::vector<DuctworkPoint> unitAttachmentPoints;
+		CollectUnitAttachmentPoints(unitAttachmentPoints);
+
 		const size_t maxPasses = states.size() + 1;
 		for (size_t pass = 0; pass < maxPasses; ++pass) {
 			bool changedThisPass = false;
 			for (size_t connectionIndex = 0; connectionIndex < connections.size(); ++connectionIndex) {
 				int trunkIndex = -1;
 				int branchIndex = -1;
-				if (!IsEndpointToSegmentBranchConnection(connections[connectionIndex], trunkIndex, branchIndex) ||
+				if (IsEndpointToSegmentBranchConnection(connections[connectionIndex], trunkIndex, branchIndex)) {
+					if (trunkIndex < 0 || trunkIndex >= static_cast<int>(states.size()) ||
+						branchIndex < 0 || branchIndex >= static_cast<int>(states.size()) ||
+						affectedSourceIds.find(states[branchIndex].sourceId) == affectedSourceIds.end()) {
+						continue;
+					}
+
+					PathConnectionAttachment trunkAttachment;
+					PathConnectionAttachment branchAttachment;
+					if (!DescribeConnectionForPath(connections[connectionIndex], trunkIndex, states[trunkIndex], trunkAttachment) ||
+						!DescribeConnectionForPath(connections[connectionIndex], branchIndex, states[branchIndex], branchAttachment) ||
+						branchAttachment.endpointSlot < 0) {
+						continue;
+					}
+
+					if (ApplyInheritedWidthToBranchState(states[trunkIndex], trunkAttachment, states[branchIndex], branchAttachment)) {
+						changedThisPass = true;
+					}
+					continue;
+				}
+
+				if (!ResolveUnitTrunkSegmentIntersection(connections[connectionIndex],
+					states,
+					unitAttachmentPoints,
+					trunkIndex,
+					branchIndex) ||
 					trunkIndex < 0 || trunkIndex >= static_cast<int>(states.size()) ||
 					branchIndex < 0 || branchIndex >= static_cast<int>(states.size()) ||
 					affectedSourceIds.find(states[branchIndex].sourceId) == affectedSourceIds.end()) {
 					continue;
 				}
 
-				PathConnectionAttachment trunkAttachment;
-				PathConnectionAttachment branchAttachment;
-				if (!DescribeConnectionForPath(connections[connectionIndex], trunkIndex, states[trunkIndex], trunkAttachment) ||
-					!DescribeConnectionForPath(connections[connectionIndex], branchIndex, states[branchIndex], branchAttachment) ||
-					branchAttachment.endpointSlot < 0) {
-					continue;
-				}
+				const int trunkSegmentIndex = (trunkIndex == connections[connectionIndex].a)
+					? connections[connectionIndex].segA
+					: connections[connectionIndex].segB;
+				const int branchSegmentIndex = (branchIndex == connections[connectionIndex].a)
+					? connections[connectionIndex].segA
+					: connections[connectionIndex].segB;
 
-				if (ApplyInheritedWidthToBranchState(states[trunkIndex], trunkAttachment, states[branchIndex], branchAttachment)) {
+				if (ApplyInheritedWidthToBranchSegmentState(states[trunkIndex],
+					trunkSegmentIndex,
+					states[branchIndex],
+					branchSegmentIndex)) {
 					changedThisPass = true;
 				}
 			}
