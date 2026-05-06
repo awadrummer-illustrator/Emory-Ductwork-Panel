@@ -6261,6 +6261,47 @@ void ClearStartSegmentIndex(AIArtHandle sourceArt)
 		return distributionTrunk && pointCount >= 3 && registerAtEndpoint;
 	}
 
+	bool SelectionCoversEverySegment(const EmorySourceState& state, const std::vector<int>& selectedSegmentIndices)
+	{
+		if (state.segmentCount <= 0 || selectedSegmentIndices.empty()) {
+			return false;
+		}
+
+		std::vector<bool> selected(static_cast<size_t>(state.segmentCount), false);
+		int validCount = 0;
+		for (size_t i = 0; i < selectedSegmentIndices.size(); ++i) {
+			const int segmentIndex = selectedSegmentIndices[i];
+			if (segmentIndex < 0 || segmentIndex >= state.segmentCount || selected[static_cast<size_t>(segmentIndex)]) {
+				continue;
+			}
+			selected[static_cast<size_t>(segmentIndex)] = true;
+			++validCount;
+		}
+
+		return validCount == state.segmentCount;
+	}
+
+	void ApplyProportionalWidthScaleToPathState(EmorySourceState& state, double scale)
+	{
+		if (state.widths.empty() || !std::isfinite(scale) || scale <= 0.0) {
+			return;
+		}
+
+		for (size_t i = 0; i < state.widths.size(); ++i) {
+			double scaledWidth = state.widths[i] * scale;
+			if (!std::isfinite(scaledWidth) || scaledWidth < kMinDuctWidth) {
+				scaledWidth = kMinDuctWidth;
+			}
+			state.widths[i] = scaledWidth;
+		}
+
+		if (std::isfinite(state.defaultWidth) && state.defaultWidth > 0.0) {
+			state.defaultWidth = (std::max)(kMinDuctWidth, state.defaultWidth * scale);
+		}
+		state.touched = true;
+		state.selectedSeed = true;
+	}
+
 	void ApplySelectedWidthToPathState(EmorySourceState& state, const std::vector<int>& selectedSegmentIndices, double newWidth)
 	{
 		if (selectedSegmentIndices.empty() || state.widths.size() != state.originalWidths.size() || state.segmentCount <= 0) {
@@ -10790,10 +10831,134 @@ bool DuctworkGeometry::ApplySelectedEmorySegmentWidth(double newWidth, std::stri
 		}
 	}
 
+	bool selectedRunsAreFullyCovered = !selectedIndicesByState.empty();
+	for (std::map<int, std::vector<int> >::const_iterator it = selectedIndicesByState.begin(); it != selectedIndicesByState.end(); ++it) {
+		if (it->first < 0 ||
+			it->first >= static_cast<int>(states.size()) ||
+			!SelectionCoversEverySegment(states[it->first], it->second)) {
+			selectedRunsAreFullyCovered = false;
+			break;
+		}
+	}
+
+	double fullSelectionReferenceWidth = 0.0;
+	if (selectedRunsAreFullyCovered) {
+		std::map<std::string, std::vector<int> > selectedIndicesBySourceId;
+		for (size_t i = 0; i < selectedSegments.size(); ++i) {
+			if (!selectedSegments[i].sourceId.empty()) {
+				selectedIndicesBySourceId[selectedSegments[i].sourceId].push_back(selectedSegments[i].segmentIndex);
+			}
+		}
+
+		for (std::map<std::string, std::vector<int> >::iterator sourceIt = selectedIndicesBySourceId.begin();
+			sourceIt != selectedIndicesBySourceId.end() && fullSelectionReferenceWidth <= 0.0;
+			++sourceIt) {
+			std::vector<int>& selectedForSource = sourceIt->second;
+			std::sort(selectedForSource.begin(), selectedForSource.end());
+			selectedForSource.erase(std::unique(selectedForSource.begin(), selectedForSource.end()), selectedForSource.end());
+
+			int stateIndex = -1;
+			std::map<std::string, int>::const_iterator indexIt = stateIndexBySourceId.find(sourceIt->first);
+			if (indexIt != stateIndexBySourceId.end()) {
+				stateIndex = indexIt->second;
+			}
+			if (stateIndex < 0 || stateIndex >= static_cast<int>(states.size()) ||
+				selectedIndicesByState.find(stateIndex) == selectedIndicesByState.end()) {
+				for (std::map<int, std::vector<int> >::const_iterator stateIt = selectedIndicesByState.begin();
+					stateIt != selectedIndicesByState.end();
+					++stateIt) {
+					if (stateIt->first >= 0 &&
+						stateIt->first < static_cast<int>(states.size()) &&
+						states[stateIt->first].sourceId == sourceIt->first) {
+						stateIndex = stateIt->first;
+						break;
+					}
+				}
+			}
+			if (stateIndex < 0 || stateIndex >= static_cast<int>(states.size())) {
+				continue;
+			}
+
+			const EmorySourceState& state = states[stateIndex];
+			for (size_t i = 0; i < selectedForSource.size(); ++i) {
+				const int segmentIndex = selectedForSource[i];
+				if (segmentIndex < 0 || segmentIndex >= static_cast<int>(state.widths.size())) {
+					continue;
+				}
+				const double candidateWidth = state.widths[segmentIndex];
+				if (std::isfinite(candidateWidth) && candidateWidth > kPointEpsilon) {
+					fullSelectionReferenceWidth = candidateWidth;
+					break;
+				}
+			}
+		}
+	}
+
+	double fullSelectionScale = 0.0;
+	if (selectedRunsAreFullyCovered && fullSelectionReferenceWidth > kPointEpsilon) {
+		fullSelectionScale = newWidth / fullSelectionReferenceWidth;
+		if (!std::isfinite(fullSelectionScale) || fullSelectionScale <= 0.0) {
+			fullSelectionScale = 0.0;
+		}
+	}
+
+	double mixedSelectionReferenceWidth = 0.0;
+	bool mixedSelectionReferenceSet = false;
+	bool selectedWidthsAreMixed = false;
+	for (std::map<int, std::vector<int> >::const_iterator it = selectedIndicesByState.begin(); it != selectedIndicesByState.end(); ++it) {
+		if (it->first < 0 || it->first >= static_cast<int>(states.size())) {
+			continue;
+		}
+
+		const EmorySourceState& state = states[it->first];
+		for (size_t i = 0; i < it->second.size(); ++i) {
+			const int segmentIndex = it->second[i];
+			if (segmentIndex < 0 || segmentIndex >= static_cast<int>(state.widths.size())) {
+				continue;
+			}
+
+			const double width = state.widths[segmentIndex];
+			if (!std::isfinite(width) || width <= kPointEpsilon) {
+				continue;
+			}
+			if (!mixedSelectionReferenceSet) {
+				mixedSelectionReferenceWidth = width;
+				mixedSelectionReferenceSet = true;
+			} else if (std::fabs(width - mixedSelectionReferenceWidth) > 1e-6) {
+				selectedWidthsAreMixed = true;
+			}
+		}
+	}
+
+	if (totalSelectedCount > 1 && selectedWidthsAreMixed && mixedSelectionReferenceWidth > kPointEpsilon) {
+		double mixedSelectionScale = newWidth / mixedSelectionReferenceWidth;
+		if (std::isfinite(mixedSelectionScale) && mixedSelectionScale > 0.0) {
+			fullSelectionScale = mixedSelectionScale;
+		}
+	}
+
+	{
+		std::ostringstream logStream;
+		logStream << "Width-apply selection selected=" << totalSelectedCount
+			<< " states=" << selectedIndicesByState.size()
+			<< " fullCovered=" << (selectedRunsAreFullyCovered ? 1 : 0)
+			<< " mixedWidths=" << (selectedWidthsAreMixed ? 1 : 0)
+			<< " proportionalScale=" << fullSelectionScale;
+		DuctworkLog::WriteAlways(logStream.str());
+	}
+
 	// PERF: Removed verbose before/after cascade logging
 	for (std::map<int, std::vector<int> >::const_iterator it = selectedIndicesByState.begin(); it != selectedIndicesByState.end(); ++it) {
-		ApplySelectedWidthToPathState(states[it->first], it->second, newWidth);
+		if (fullSelectionScale > 0.0) {
+			ApplyProportionalWidthScaleToPathState(states[it->first], fullSelectionScale);
+		} else {
+			ApplySelectedWidthToPathState(states[it->first], it->second, newWidth);
+		}
 	}
+
+	std::vector<DuctworkConnection> widthConnections;
+	CollectEmoryNetworkConnections(states, widthConnections);
+	CascadeConnectedBranchWidths(states, widthConnections);
 
 	std::set<std::string> affectedSourceIds;
 	for (size_t i = 0; i < states.size(); ++i) {
