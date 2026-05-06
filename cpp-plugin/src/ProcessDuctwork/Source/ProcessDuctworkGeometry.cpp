@@ -6465,6 +6465,49 @@ void ClearStartSegmentIndex(AIArtHandle sourceArt)
 		return changed;
 	}
 
+	bool PropagateWidthToBranchSegmentState(const EmorySourceState& upstreamState,
+		int upstreamSegmentIndex,
+		EmorySourceState& branchState,
+		int branchSegmentIndex)
+	{
+		if (upstreamSegmentIndex < 0 ||
+			upstreamSegmentIndex >= static_cast<int>(upstreamState.widths.size()) ||
+			branchSegmentIndex < 0 ||
+			branchSegmentIndex >= static_cast<int>(branchState.widths.size()) ||
+			branchState.widths.size() != branchState.originalWidths.size()) {
+			return false;
+		}
+
+		double upstreamOriginalWidth = upstreamState.defaultWidth;
+		if (upstreamSegmentIndex < static_cast<int>(upstreamState.originalWidths.size()) &&
+			upstreamState.originalWidths[upstreamSegmentIndex] > kPointEpsilon) {
+			upstreamOriginalWidth = upstreamState.originalWidths[upstreamSegmentIndex];
+		}
+
+		double branchOriginalWidth = branchState.defaultWidth;
+		if (branchSegmentIndex < static_cast<int>(branchState.originalWidths.size()) &&
+			branchState.originalWidths[branchSegmentIndex] > kPointEpsilon) {
+			branchOriginalWidth = branchState.originalWidths[branchSegmentIndex];
+		}
+
+		double ratio = 1.0;
+		if (upstreamOriginalWidth > kPointEpsilon) {
+			ratio = branchOriginalWidth / upstreamOriginalWidth;
+		}
+
+		double branchWidth = upstreamState.widths[upstreamSegmentIndex] * ratio;
+		if (!std::isfinite(branchWidth) || branchWidth < kMinDuctWidth) {
+			branchWidth = kMinDuctWidth;
+		}
+
+		const bool changed = !NearlyEqual(branchState.widths[branchSegmentIndex], branchWidth, 0.001);
+		branchState.widths[branchSegmentIndex] = branchWidth;
+		ApplyCascadeFromAnchor(branchState.originalWidths, branchState.widths, branchSegmentIndex, -1);
+		ApplyCascadeFromAnchor(branchState.originalWidths, branchState.widths, branchSegmentIndex, 1);
+		branchState.touched = true;
+		return changed;
+	}
+
 	bool ApplyInheritedWidthToBranchState(const EmorySourceState& trunkState,
 		const PathConnectionAttachment& trunkAttachment,
 		EmorySourceState& branchState,
@@ -6741,6 +6784,8 @@ void ClearStartSegmentIndex(AIArtHandle sourceArt)
 	void CascadeConnectedBranchWidths(std::vector<EmorySourceState>& states, const std::vector<DuctworkConnection>& connections)
 	{
 		std::vector<int> queue;
+		std::vector<DuctworkPoint> unitAttachmentPoints;
+		CollectUnitAttachmentPoints(unitAttachmentPoints);
 
 		for (size_t i = 0; i < states.size(); ++i) {
 			if (states[i].touched) {
@@ -6753,6 +6798,23 @@ void ClearStartSegmentIndex(AIArtHandle sourceArt)
 			for (size_t connectionIndex = 0; connectionIndex < connections.size(); ++connectionIndex) {
 				const DuctworkConnection& connection = connections[connectionIndex];
 				if (connection.type == kConnectionSegmentIntersection) {
+					int trunkIndex = -1;
+					int branchIndex = -1;
+					if (!ResolveUnitTrunkSegmentIntersection(connection, states, unitAttachmentPoints, trunkIndex, branchIndex) ||
+						currentIndex != trunkIndex ||
+						branchIndex < 0 || branchIndex >= static_cast<int>(states.size()) ||
+						states[branchIndex].selectedSeed) {
+						continue;
+					}
+
+					const int trunkSegmentIndex = (trunkIndex == connection.a) ? connection.segA : connection.segB;
+					const int branchSegmentIndex = (branchIndex == connection.a) ? connection.segA : connection.segB;
+					if (PropagateWidthToBranchSegmentState(states[trunkIndex],
+						trunkSegmentIndex,
+						states[branchIndex],
+						branchSegmentIndex)) {
+						queue.push_back(branchIndex);
+					}
 					continue;
 				}
 
