@@ -1460,7 +1460,19 @@ bool EmoryDuctworkPanel::ApplyTransformSelection(double targetScale, double targ
 		CollectRotatablePartItemsSelected(selection[i], rotatableParts, true);
 	}
 
+	std::vector<AIArtHandle> emoryLinePaths;
+	std::vector<AIArtHandle> regularLinePaths;
+	for (size_t i = 0; i < linePaths.size(); ++i) {
+		if (DuctworkGeometry::IsGeneratedEmoryBody(linePaths[i])) {
+			emoryLinePaths.push_back(linePaths[i]);
+		} else {
+			regularLinePaths.push_back(linePaths[i]);
+		}
+	}
+	linePaths.swap(regularLinePaths);
+
 	DuctworkLog::Write("Panel ApplyTransform: linePaths=" + std::to_string(static_cast<int>(linePaths.size())) +
+		" emoryLinePaths=" + std::to_string(static_cast<int>(emoryLinePaths.size())) +
 		" partItems=" + std::to_string(static_cast<int>(partItems.size())) +
 		" rotatableParts=" + std::to_string(static_cast<int>(rotatableParts.size())));
 
@@ -1472,7 +1484,47 @@ bool EmoryDuctworkPanel::ApplyTransformSelection(double targetScale, double targ
 	}
 
 	size_t lineScaled = 0;
+	size_t emoryStrokeScaled = 0;
 	size_t partTransformed = 0;
+
+	if (applyScale && !emoryLinePaths.empty()) {
+		double baselineStroke = 0.0;
+		bool needsEmoryStrokeApply = false;
+		for (size_t i = 0; i < emoryLinePaths.size(); ++i) {
+			const double candidateBaseline = GetBaselineMaxStrokeWidth(emoryLinePaths[i]);
+			if (candidateBaseline > baselineStroke) {
+				baselineStroke = candidateBaseline;
+			}
+		}
+		if (baselineStroke <= 0.0) {
+			baselineStroke = 8.0;
+		}
+		double targetStrokeWidth = baselineStroke * (targetScale / 100.0);
+		if (!std::isfinite(targetStrokeWidth) || targetStrokeWidth < 0.25) {
+			targetStrokeWidth = 0.25;
+		}
+		for (size_t i = 0; i < emoryLinePaths.size(); ++i) {
+			double currentStroke = 0.0;
+			if (!GetMaxStrokeWidth(emoryLinePaths[i], currentStroke) ||
+				std::fabs(currentStroke - targetStrokeWidth) >= 0.0001) {
+				needsEmoryStrokeApply = true;
+				break;
+			}
+		}
+		if (needsEmoryStrokeApply) {
+			std::string strokeMessage;
+			if (DuctworkGeometry::ApplySelectedEmoryStrokeWidth(targetStrokeWidth, strokeMessage, false)) {
+				emoryStrokeScaled = emoryLinePaths.size();
+				for (size_t i = 0; i < emoryLinePaths.size(); ++i) {
+					DuctworkMetadata::SetDouble(emoryLinePaths[i], "MDUX_OriginalStrokeWidth", baselineStroke);
+					DuctworkMetadata::SetDouble(emoryLinePaths[i], "MDUX_CurrentScale", targetScale);
+				}
+				DuctworkLog::Write("Panel ApplyTransform: emoryStrokeWidth=" + std::to_string(targetStrokeWidth) +
+					" selectedGenerated=" + std::to_string(static_cast<int>(emoryLinePaths.size())) +
+					" message=" + strokeMessage);
+			}
+		}
+	}
 
 	for (size_t i = 0; i < linePaths.size(); ++i) {
 		AIArtHandle art = linePaths[i];
@@ -1559,9 +1611,9 @@ bool EmoryDuctworkPanel::ApplyTransformSelection(double targetScale, double targ
 	}
 
 	if (updateUI) {
-		if (linePaths.empty() && partItems.empty()) {
+		if (linePaths.empty() && emoryLinePaths.empty() && partItems.empty()) {
 			SetStatusText(L"No ductwork parts or lines selected.");
-		} else if (lineScaled == 0 && partTransformed == 0) {
+		} else if (lineScaled == 0 && emoryStrokeScaled == 0 && partTransformed == 0) {
 			SetStatusText(L"No transform changes.");
 		} else {
 			SetStatusText(L"Transform applied.");
@@ -1571,16 +1623,16 @@ bool EmoryDuctworkPanel::ApplyTransformSelection(double targetScale, double targ
 
 	ReselectArtList(selectionSnapshot);
 	if (outMessage) {
-		if (linePaths.empty() && partItems.empty()) {
+		if (linePaths.empty() && emoryLinePaths.empty() && partItems.empty()) {
 			*outMessage = "No ductwork parts or lines selected.";
-		} else if (lineScaled == 0 && partTransformed == 0) {
+		} else if (lineScaled == 0 && emoryStrokeScaled == 0 && partTransformed == 0) {
 			*outMessage = "No transform changes.";
 		} else {
-			*outMessage = "Transformed " + std::to_string(lineScaled + partTransformed) + " item(s).";
+			*outMessage = "Transformed " + std::to_string(lineScaled + emoryStrokeScaled + partTransformed) + " item(s).";
 		}
 	}
 
-	return (lineScaled > 0 || partTransformed > 0);
+	return (lineScaled > 0 || emoryStrokeScaled > 0 || partTransformed > 0);
 }
 
 void EmoryDuctworkPanel::ApplyQuickRotate(double angle)

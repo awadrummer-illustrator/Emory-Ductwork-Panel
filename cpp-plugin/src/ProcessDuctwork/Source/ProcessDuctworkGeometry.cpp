@@ -7068,6 +7068,74 @@ void ClearStartSegmentIndex(AIArtHandle sourceArt)
 		ApplySelectedWidthToPathState(state, selectedSegmentIndices, newWidth);
 	}
 
+	bool SelectionContainsOnlyTerminalWidthControls(const EmorySourceState& state, const std::vector<int>& selectedSegmentIndices)
+	{
+		if (!state.art || state.segmentCount <= 0 || selectedSegmentIndices.empty()) {
+			return false;
+		}
+
+		std::set<size_t> omittedSegments;
+		CollectTerminalOmittedSegments(state.art, static_cast<size_t>(state.segmentCount), omittedSegments);
+		std::vector<int> canonicalSelectedIndices = selectedSegmentIndices;
+		size_t canonicalSegmentCount = static_cast<size_t>(state.segmentCount);
+
+		AIArtHandle backupArt = nullptr;
+		DuctworkPath backupPath;
+		if (GetPrimaryBackupCenterlineForSourceId(state.sourceId, backupArt, backupPath) &&
+			backupPath.points.size() >= 2) {
+			const size_t backupSegmentCount = backupPath.points.size() - 1;
+			std::set<size_t> backupOmittedSegments;
+			CollectTerminalOmittedSegments(backupArt, backupSegmentCount, backupOmittedSegments);
+			if (!backupOmittedSegments.empty()) {
+				std::vector<DuctworkPoint> fragmentPoints;
+				SanitizePolyline(state.path.points, fragmentPoints);
+				std::vector<int> backupIndices;
+				if (MapFragmentSegmentsToBackupIndices(fragmentPoints, backupPath.points, backupIndices)) {
+					std::vector<int> mappedSelectedIndices;
+					for (size_t i = 0; i < selectedSegmentIndices.size(); ++i) {
+						const int localIndex = selectedSegmentIndices[i];
+						if (localIndex < 0 || localIndex >= static_cast<int>(backupIndices.size()) || backupIndices[localIndex] < 0) {
+							return false;
+						}
+						mappedSelectedIndices.push_back(backupIndices[localIndex]);
+					}
+					canonicalSelectedIndices = mappedSelectedIndices;
+					canonicalSegmentCount = backupSegmentCount;
+					omittedSegments = backupOmittedSegments;
+				}
+			}
+		}
+
+		if (omittedSegments.empty()) {
+			return false;
+		}
+
+		for (size_t i = 0; i < canonicalSelectedIndices.size(); ++i) {
+			const int segmentIndex = canonicalSelectedIndices[i];
+			if (segmentIndex < 0 || segmentIndex >= static_cast<int>(canonicalSegmentCount)) {
+				return false;
+			}
+			if (omittedSegments.find(static_cast<size_t>(segmentIndex)) != omittedSegments.end()) {
+				continue;
+			}
+
+			bool atStart = false;
+			bool atEnd = false;
+			if (!ResolveTerminalStyleTargetFromSelection(segmentIndex,
+				canonicalSegmentCount,
+				omittedSegments,
+				true,
+				true,
+				atStart,
+				atEnd) ||
+				(!atStart && !atEnd)) {
+				return false;
+			}
+		}
+
+		return true;
+	}
+
 	bool PropagateWidthToBranchState(const EmorySourceState& upstreamState,
 		const PathConnectionAttachment& upstreamAttachment,
 		EmorySourceState& branchState,
@@ -12261,6 +12329,16 @@ bool DuctworkGeometry::ApplySelectedEmorySegmentWidth(double newWidth, std::stri
 		fullSelectionScale = 0.0;
 	}
 
+	bool terminalOnlyWidthSelection = !selectedIndicesByState.empty();
+	for (std::map<int, std::vector<int> >::const_iterator it = selectedIndicesByState.begin(); it != selectedIndicesByState.end(); ++it) {
+		if (it->first < 0 ||
+			it->first >= static_cast<int>(states.size()) ||
+			!SelectionContainsOnlyTerminalWidthControls(states[it->first], it->second)) {
+			terminalOnlyWidthSelection = false;
+			break;
+		}
+	}
+
 	{
 		std::ostringstream logStream;
 		logStream << "Width-apply selection selected=" << totalSelectedCount
@@ -12268,6 +12346,7 @@ bool DuctworkGeometry::ApplySelectedEmorySegmentWidth(double newWidth, std::stri
 			<< " fullCovered=" << (selectedRunsAreFullyCovered ? 1 : 0)
 			<< " mixedWidths=" << (selectedWidthsAreMixed ? 1 : 0)
 			<< " uniformMixed=" << (forceUniformMixedSelection ? 1 : 0)
+			<< " terminalOnly=" << (terminalOnlyWidthSelection ? 1 : 0)
 			<< " proportionalScale=" << fullSelectionScale;
 		DuctworkLog::WriteAlways(logStream.str());
 	}
@@ -12284,8 +12363,12 @@ bool DuctworkGeometry::ApplySelectedEmorySegmentWidth(double newWidth, std::stri
 	}
 
 	std::vector<DuctworkConnection> widthConnections;
-	CollectEmoryNetworkConnections(states, widthConnections);
-	CascadeConnectedBranchWidths(states, widthConnections);
+	if (terminalOnlyWidthSelection) {
+		DuctworkLog::WriteAlways("Emory width-apply terminal-only selection: branch cascade skipped");
+	} else {
+		CollectEmoryNetworkConnections(states, widthConnections);
+		CascadeConnectedBranchWidths(states, widthConnections);
+	}
 
 	std::set<std::string> affectedSourceIds;
 	for (size_t i = 0; i < states.size(); ++i) {
@@ -12402,7 +12485,7 @@ bool DuctworkGeometry::ApplySelectedEmorySegmentWidth(double newWidth, std::stri
 	return true;
 }
 
-bool DuctworkGeometry::ApplySelectedEmoryStrokeWidth(double newWidth, std::string& outMessage)
+bool DuctworkGeometry::ApplySelectedEmoryStrokeWidth(double newWidth, std::string& outMessage, bool includeThermostatLines)
 {
 	outMessage = "Select Emory ductwork or thermostat lines first.";
 	if (!sAIArt) {
@@ -12424,7 +12507,9 @@ bool DuctworkGeometry::ApplySelectedEmoryStrokeWidth(double newWidth, std::strin
 	CollectSelectedEmorySourceIds(sourceIds);
 
 	std::vector<AIArtHandle> selectedThermostatArts;
-	CollectSelectedThermostatLineArts(selectedThermostatArts);
+	if (includeThermostatLines) {
+		CollectSelectedThermostatLineArts(selectedThermostatArts);
+	}
 
 	if (sourceIds.empty() && selectedThermostatArts.empty()) {
 		return false;

@@ -59,7 +59,7 @@ namespace DuctworkGeometry
 	bool SetSelectedEmoryStartSegment(std::string& outMessage);
 	bool ClearSelectedEmoryStartSegment(std::string& outMessage);
 	bool ApplySelectedEmorySegmentWidth(double newWidth, std::string& outMessage);
-	bool ApplySelectedEmoryStrokeWidth(double newWidth, std::string& outMessage);
+	bool ApplySelectedEmoryStrokeWidth(double newWidth, std::string& outMessage, bool includeThermostatLines = true);
 }
 
 #endif // __ProcessDuctworkGeometry_H__
