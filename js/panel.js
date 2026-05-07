@@ -71,6 +71,7 @@
     let toggleConnectorStyleBtn = document.getElementById('toggle-connector-style-btn');
     let markOverlapSeparateBtn = document.getElementById('mark-overlap-separate-btn');
     let setEmoryStartBtn = document.getElementById('set-emory-start-btn');
+    let selectEmoryCenterlinesBtn = document.getElementById('select-emory-centerlines-btn');
     let isolateEmoryFinalSegmentsBtn = document.getElementById('isolate-emory-final-segments-btn');
     let emoryWidthSlider = document.getElementById('emory-width-slider');
     let emoryWidthInput = document.getElementById('emory-width-input');
@@ -102,6 +103,7 @@
         toggleConnectorStyleBtn = document.getElementById('toggle-connector-style-btn');
         markOverlapSeparateBtn = document.getElementById('mark-overlap-separate-btn');
         setEmoryStartBtn = document.getElementById('set-emory-start-btn');
+        selectEmoryCenterlinesBtn = document.getElementById('select-emory-centerlines-btn');
         isolateEmoryFinalSegmentsBtn = document.getElementById('isolate-emory-final-segments-btn');
         emoryWidthSlider = document.getElementById('emory-width-slider');
         emoryWidthInput = document.getElementById('emory-width-input');
@@ -1452,6 +1454,27 @@
         }
     }
 
+    async function handleSelectEmoryCenterlinesClick() {
+        if (!selectEmoryCenterlinesBtn) return;
+        selectEmoryCenterlinesBtn.disabled = true;
+        setEmoryWidthStatus('Selecting Emory centerlines...', false);
+        try {
+            await ensureBridgeLoaded();
+            const result = parseBridgeJsonResult(await evalScript('MDUX_cppSelectSelectedEmoryCenterlines()'));
+            if (result && result.ok !== false) {
+                setEmoryWidthStatus(result.message || 'Centerlines selected.', false);
+                await refreshEmorySelectionState(true);
+            } else {
+                setEmoryWidthStatus((result && result.message) ? result.message : 'Unable to select centerlines.', true);
+            }
+        } catch (e) {
+            setEmoryWidthStatus('Unable to select centerlines: ' + e.message, true);
+        } finally {
+            selectEmoryCenterlinesBtn.disabled = false;
+            scheduleSkipOrthoRefresh();
+        }
+    }
+
     async function rotateSelection(angle) {
         if (!isFinite(angle)) {
             setSelectionStatus('Rotation value must be numeric.', true);
@@ -1960,7 +1983,7 @@
 
         try {
             // Add a timeout race to prevent hanging if Illustrator doesn't respond
-            const transformPromise = evalScript(`MDUX_cppTransformEachLive(${payload.scale}, ${payload.rotate})`);
+            const transformPromise = evalScript(`MDUX_cppTransformEachLive(${payload.scale}, ${payload.rotate}, ${payload.scaleDirty ? 'true' : 'false'}, ${payload.rotateDirty ? 'true' : 'false'})`);
             const timeoutPromise = new Promise(resolve => setTimeout(() => resolve("TIMEOUT"), 1000));
 
             const result = await Promise.race([transformPromise, timeoutPromise]);
@@ -2122,14 +2145,16 @@
             const s = parseFloat(teScaleInput.value) || 100;
             const r = parseFloat(teRotateInput.value) || 0;
 
-            if (s === 100 && r === 0) {
+            if (s === 100 && r === 0 && !teScaleDirty && !teRotateDirty) {
                 setSelectionStatus("No changes to apply.", false);
                 return;
             }
 
             setSelectionStatus("Transforming...", false);
             try {
-                await evalScript(`MDUX_cppTransformEach(${s}, ${r})`);
+                const scaleDirty = teScaleDirty || s !== 100;
+                const rotateDirty = teRotateDirty || r !== 0;
+                await evalScript(`MDUX_cppTransformEach(${s}, ${r}, ${scaleDirty ? 'true' : 'false'}, ${rotateDirty ? 'true' : 'false'})`);
                 setSelectionStatus("Transformation applied.", false);
                 // Reset internal state but NOT input values - let refresh update them from metadata
                 resetTransformControls(false);
@@ -2334,6 +2359,7 @@
         if (toggleConnectorStyleBtn) toggleConnectorStyleBtn.addEventListener('click', handleToggleConnectorStyleClick);
         if (markOverlapSeparateBtn) markOverlapSeparateBtn.addEventListener('click', handleMarkOverlapSeparateClick);
         if (setEmoryStartBtn) setEmoryStartBtn.addEventListener('click', handleSetEmoryStartClick);
+        if (selectEmoryCenterlinesBtn) selectEmoryCenterlinesBtn.addEventListener('click', handleSelectEmoryCenterlinesClick);
         if (isolateEmoryFinalSegmentsBtn) isolateEmoryFinalSegmentsBtn.addEventListener('click', handleIsolateEmoryFinalSegmentsClick);
         if (processEmoryBtn) processEmoryBtn.addEventListener('click', handleProcessEmoryClick);
         if (emoryWidthSlider && emoryWidthInput) {
@@ -2822,14 +2848,12 @@
                 if (teScaleSlider) teScaleSlider.value = Math.max(10, Math.min(400, typedScale));
 
                 // Apply transform directly regardless of Live mode
-                if (typedScale !== 100 || currentRotation !== 0) {
-                    setSelectionStatus("Transforming...", false);
-                    try {
-                        await evalScript(`MDUX_cppTransformEach(${typedScale}, ${currentRotation})`);
-                        setSelectionStatus("Transformation applied.", false);
-                    } catch (err) {
-                        setSelectionStatus("Error: " + err.message, true);
-                    }
+                setSelectionStatus("Transforming...", false);
+                try {
+                    await evalScript(`MDUX_cppTransformEach(${typedScale}, ${currentRotation}, true, false)`);
+                    setSelectionStatus("Transformation applied.", false);
+                } catch (err) {
+                    setSelectionStatus("Error: " + err.message, true);
                 }
 
                 // Reset controls after applying

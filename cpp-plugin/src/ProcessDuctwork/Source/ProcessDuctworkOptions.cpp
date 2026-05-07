@@ -62,7 +62,7 @@ ProcessDuctworkOptions::ProcessDuctworkOptions()
 	: skipOrtho(false),
 	skipAllBranchSegments(false),
 	skipFinalRegisterSegment(false),
-	skipFinalSegmentThickness(false),
+	skipFinalSegmentThickness(true),
 	skipRegisterRotation(false),
 	enableRegisterCarve(false),
 	enableOverlapCarve(false),

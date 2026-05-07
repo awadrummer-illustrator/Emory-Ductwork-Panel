@@ -4109,12 +4109,14 @@ function MDUX_transformEach(scale, rotation, undoPrevious) {
     }
 }
 
-function MDUX_cppTransformEach(scale, rotation) {
+function MDUX_cppTransformEach(scale, rotation, scaleDirty, rotateDirty) {
     try {
         if (app.documents.length === 0) {
             return JSON.stringify({ ok: false, message: "No document open." });
         }
-        var payload = "action=transform;scale=" + scale + ";rotation=" + rotation;
+        var payload = "action=transform;scale=" + scale + ";rotation=" + rotation +
+            ";scaleDirty=" + (!!scaleDirty ? "1" : "0") +
+            ";rotateDirty=" + (!!rotateDirty ? "1" : "0");
         var result = app.sendScriptMessage("EmoryDuctwork", "EmoryDuctworkPanel", payload);
         return result || JSON.stringify({ ok: false, message: "No response from C++ panel." });
     } catch (e) {
@@ -4122,12 +4124,15 @@ function MDUX_cppTransformEach(scale, rotation) {
     }
 }
 
-function MDUX_cppTransformEachLive(scale, rotation) {
+function MDUX_cppTransformEachLive(scale, rotation, scaleDirty, rotateDirty) {
     try {
         if (app.documents.length === 0) {
             return JSON.stringify({ ok: false, message: "No document open." });
         }
-        var payload = "action=transform;scale=" + scale + ";rotation=" + rotation + ";live=1";
+        var payload = "action=transform;scale=" + scale + ";rotation=" + rotation +
+            ";scaleDirty=" + (!!scaleDirty ? "1" : "0") +
+            ";rotateDirty=" + (!!rotateDirty ? "1" : "0") +
+            ";live=1";
         var result = app.sendScriptMessage("EmoryDuctwork", "EmoryDuctworkPanel", payload);
         return result || JSON.stringify({ ok: false, message: "No response from C++ panel." });
     } catch (e) {
@@ -4306,6 +4311,19 @@ function MDUX_cppSelectSelectedEmoryFinalSegments() {
         return result || JSON.stringify({ ok: false, message: "No response from C++ panel." });
     } catch (e) {
         return JSON.stringify({ ok: false, message: "C++ select Emory final segments error: " + e });
+    }
+}
+
+function MDUX_cppSelectSelectedEmoryCenterlines() {
+    try {
+        if (app.documents.length === 0) {
+            return JSON.stringify({ ok: false, message: "No document open." });
+        }
+        var payload = "action=select-emory-centerlines";
+        var result = app.sendScriptMessage("EmoryDuctwork", "EmoryDuctworkPanel", payload);
+        return result || JSON.stringify({ ok: false, message: "No response from C++ panel." });
+    } catch (e) {
+        return JSON.stringify({ ok: false, message: "C++ select Emory centerlines error: " + e });
     }
 }
 
@@ -4686,18 +4704,6 @@ function MDUX_getSelectionTransformState() {
         var sel = app.selection;
         if (!sel || sel.length === 0) {
             return JSON.stringify({ ok: false });
-        }
-
-        if (!MDUX_selectionHasPathItems(sel) && MDUX_selectionHasPlacedItems(sel)) {
-            return JSON.stringify({
-                ok: true,
-                scale: null,
-                rotation: null,
-                mixedScale: true,
-                mixedRotation: true,
-                count: sel.length,
-                reason: "placed-only"
-            });
         }
 
         if (MDUX_selectionExceedsPathLimit(sel, MDUX_LIVE_SELECTION_PATH_LIMIT)) {
