@@ -6184,6 +6184,155 @@ void ClearStartSegmentIndex(AIArtHandle sourceArt)
 		return true;
 	}
 
+	bool ResolveEndpointAttachmentNearPoint(const EmorySourceState& state,
+		const DuctworkPoint& point,
+		double tolerance,
+		PathConnectionAttachment& outAttachment)
+	{
+		outAttachment = PathConnectionAttachment();
+		if (state.path.points.size() < 2 || state.segmentCount <= 0) {
+			return false;
+		}
+
+		const double toleranceSq = tolerance * tolerance;
+		bool found = false;
+		double bestDistanceSq = toleranceSq;
+		const DuctworkPoint& startPoint = state.path.points.front();
+		const double startDx = startPoint.x - point.x;
+		const double startDy = startPoint.y - point.y;
+		const double startDistanceSq = (startDx * startDx) + (startDy * startDy);
+		if (startDistanceSq <= bestDistanceSq) {
+			outAttachment.endpointSlot = 0;
+			outAttachment.segmentIndex = 0;
+			bestDistanceSq = startDistanceSq;
+			found = true;
+		}
+
+		const DuctworkPoint& endPoint = state.path.points.back();
+		const double endDx = endPoint.x - point.x;
+		const double endDy = endPoint.y - point.y;
+		const double endDistanceSq = (endDx * endDx) + (endDy * endDy);
+		if (endDistanceSq <= bestDistanceSq) {
+			outAttachment.endpointSlot = 1;
+			outAttachment.segmentIndex = state.segmentCount - 1;
+			found = true;
+		}
+
+		return found;
+	}
+
+	size_t ApplyDirectUnitPairEndpointWidthSync(std::vector<EmorySourceState>& states,
+		const std::set<std::string>& affectedSourceIds,
+		const std::vector<DuctworkPoint>& unitAttachmentPoints)
+	{
+		if (states.size() < 2 || affectedSourceIds.empty() || unitAttachmentPoints.empty()) {
+			return 0;
+		}
+
+		size_t changedCount = 0;
+		for (size_t transitionIndex = 0; transitionIndex < states.size(); ++transitionIndex) {
+			EmorySourceState& transitionState = states[transitionIndex];
+			if (affectedSourceIds.find(transitionState.sourceId) == affectedSourceIds.end() ||
+				!IsGreenOrLightOrangeRunLayer(transitionState.path.layerName)) {
+				continue;
+			}
+
+			for (size_t mainIndex = 0; mainIndex < states.size(); ++mainIndex) {
+				if (mainIndex == transitionIndex) {
+					continue;
+				}
+
+				const EmorySourceState& mainState = states[mainIndex];
+				if (!IsUnitPairTransitionToMain(transitionState.path.layerName, mainState.path.layerName)) {
+					continue;
+				}
+
+				for (size_t pointIndex = 0; pointIndex < unitAttachmentPoints.size(); ++pointIndex) {
+					PathConnectionAttachment mainAttachment;
+					PathConnectionAttachment transitionAttachment;
+					if (!ResolveEndpointAttachmentNearPoint(mainState, unitAttachmentPoints[pointIndex], 10.0, mainAttachment) ||
+						!ResolveEndpointAttachmentNearPoint(transitionState, unitAttachmentPoints[pointIndex], 10.0, transitionAttachment)) {
+						continue;
+					}
+
+					const double sourceWidth = (mainAttachment.segmentIndex >= 0 &&
+						mainAttachment.segmentIndex < static_cast<int>(mainState.widths.size()))
+						? mainState.widths[mainAttachment.segmentIndex]
+						: 0.0;
+					if (SyncEndpointWidthFromState(mainState, mainAttachment, transitionState, transitionAttachment)) {
+						++changedCount;
+						std::ostringstream logStream;
+						logStream << "Emory direct unit-pair width sync initial transition="
+							<< transitionState.sourceId
+							<< " main=" << mainState.sourceId
+							<< " point=[" << unitAttachmentPoints[pointIndex].x << "," << unitAttachmentPoints[pointIndex].y << "]"
+							<< " sourceWidth=" << sourceWidth
+							<< " transitionSegment=" << transitionAttachment.segmentIndex;
+						DuctworkLog::Write(logStream.str());
+					}
+				}
+			}
+		}
+
+		return changedCount;
+	}
+
+	bool CascadeDirectUnitPairEndpointWidthsFromState(std::vector<EmorySourceState>& states,
+		int currentIndex,
+		const std::vector<DuctworkPoint>& unitAttachmentPoints,
+		std::vector<int>& queue)
+	{
+		if (currentIndex < 0 ||
+			currentIndex >= static_cast<int>(states.size()) ||
+			unitAttachmentPoints.empty()) {
+			return false;
+		}
+
+		bool changed = false;
+		for (size_t neighborIndex = 0; neighborIndex < states.size(); ++neighborIndex) {
+			if (static_cast<int>(neighborIndex) == currentIndex ||
+				states[neighborIndex].selectedSeed) {
+				continue;
+			}
+
+			if (!IsUnitPairTransitionToMain(states[currentIndex].path.layerName, states[neighborIndex].path.layerName) &&
+				!IsUnitPairTransitionToMain(states[neighborIndex].path.layerName, states[currentIndex].path.layerName)) {
+				continue;
+			}
+
+			for (size_t pointIndex = 0; pointIndex < unitAttachmentPoints.size(); ++pointIndex) {
+				PathConnectionAttachment currentAttachment;
+				PathConnectionAttachment neighborAttachment;
+				if (!ResolveEndpointAttachmentNearPoint(states[currentIndex], unitAttachmentPoints[pointIndex], 10.0, currentAttachment) ||
+					!ResolveEndpointAttachmentNearPoint(states[neighborIndex], unitAttachmentPoints[pointIndex], 10.0, neighborAttachment)) {
+					continue;
+				}
+
+				const double sourceWidth = (currentAttachment.segmentIndex >= 0 &&
+					currentAttachment.segmentIndex < static_cast<int>(states[currentIndex].widths.size()))
+					? states[currentIndex].widths[currentAttachment.segmentIndex]
+					: 0.0;
+				if (SyncEndpointWidthFromState(states[currentIndex],
+					currentAttachment,
+					states[neighborIndex],
+					neighborAttachment)) {
+					queue.push_back(static_cast<int>(neighborIndex));
+					changed = true;
+					std::ostringstream logStream;
+					logStream << "Emory direct unit-pair width sync cascade source="
+						<< states[currentIndex].sourceId
+						<< " target=" << states[neighborIndex].sourceId
+						<< " point=[" << unitAttachmentPoints[pointIndex].x << "," << unitAttachmentPoints[pointIndex].y << "]"
+						<< " sourceWidth=" << sourceWidth
+						<< " targetSegment=" << neighborAttachment.segmentIndex;
+					DuctworkLog::Write(logStream.str());
+				}
+			}
+		}
+
+		return changed;
+	}
+
 	bool CollectEmorySourceStates(std::vector<EmorySourceState>& outStates, std::map<std::string, int>& outIndexBySourceId)
 	{
 		outStates.clear();
@@ -7155,13 +7304,11 @@ void ClearStartSegmentIndex(AIArtHandle sourceArt)
 
 		std::vector<DuctworkConnection> connections;
 		CollectEmoryNetworkConnections(states, connections);
-		if (connections.empty()) {
-			return 0;
-		}
 
 		std::vector<DuctworkPoint> unitAttachmentPoints;
 		CollectUnitAttachmentPoints(unitAttachmentPoints);
 
+		size_t directUnitPairSyncs = 0;
 		const size_t maxPasses = states.size() + 1;
 		for (size_t pass = 0; pass < maxPasses; ++pass) {
 			bool changedThisPass = false;
@@ -7237,7 +7384,15 @@ void ClearStartSegmentIndex(AIArtHandle sourceArt)
 					changedThisPass = true;
 				}
 			}
+			size_t directSyncsThisPass = ApplyDirectUnitPairEndpointWidthSync(states, affectedSourceIds, unitAttachmentPoints);
+			if (directSyncsThisPass > 0) {
+				directUnitPairSyncs += directSyncsThisPass;
+				changedThisPass = true;
+			}
 			if (!changedThisPass) {
+				break;
+			}
+			if (connections.empty()) {
 				break;
 			}
 		}
@@ -7252,6 +7407,7 @@ void ClearStartSegmentIndex(AIArtHandle sourceArt)
 			std::ostringstream logStream;
 			logStream << "Emory branch width inheritance applied sources=" << touchedCount
 				<< " connections=" << connections.size()
+				<< " unitPairSyncs=" << directUnitPairSyncs
 				<< " factor=" << kBranchInheritedWidthRatio;
 			DuctworkLog::Write(logStream.str());
 		}
@@ -7302,6 +7458,7 @@ void ClearStartSegmentIndex(AIArtHandle sourceArt)
 
 		for (size_t queueIndex = 0; queueIndex < queue.size(); ++queueIndex) {
 			const int currentIndex = queue[queueIndex];
+			CascadeDirectUnitPairEndpointWidthsFromState(states, currentIndex, unitAttachmentPoints, queue);
 			for (size_t connectionIndex = 0; connectionIndex < connections.size(); ++connectionIndex) {
 				const DuctworkConnection& connection = connections[connectionIndex];
 				if (connection.type == kConnectionSegmentIntersection) {

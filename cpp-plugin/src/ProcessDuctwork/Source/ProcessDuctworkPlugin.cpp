@@ -97,6 +97,34 @@ namespace
 		std::chrono::steady_clock::time_point mStart;
 	};
 
+	void SetProcessUndoText()
+	{
+		if (!sAIUndo) {
+			return;
+		}
+		sAIUndo->SetUndoRedoCmdTextUS(
+			ai::UnicodeString::FromUTF8("Undo Process Emory Ductwork"),
+			ai::UnicodeString::FromUTF8("Redo Process Emory Ductwork"),
+			ai::UnicodeString::FromUTF8("Process Emory Ductwork"));
+	}
+
+	void LogUndoTransactions(const char* label)
+	{
+		if (!sAIUndo || !label) {
+			return;
+		}
+
+		ai::int32 past = 0;
+		ai::int32 future = 0;
+		if (sAIUndo->CountTransactions(&past, &future) != kNoErr) {
+			return;
+		}
+
+		std::ostringstream stream;
+		stream << "Undo transactions " << label << " past=" << past << " future=" << future;
+		DuctworkLog::Write(stream.str());
+	}
+
 	class RotationOverrideScope
 	{
 	public:
@@ -2026,6 +2054,8 @@ ASErr ProcessDuctworkPlugin::ProcessDuctwork(const ProcessDuctworkOptions& optio
 	ai::UnicodeString message;
 
 	DuctworkLog::Write("EmoryDuctwork start");
+	SetProcessUndoText();
+	LogUndoTransactions("process-start");
 	CepSuspendScope cepSuspend;
 	RotationOverrideScope rotationScope(options.hasRotationOverride, options.rotationOverride);
 	RegisterRotationScope registerRotationScope(!options.skipRegisterRotation);
@@ -2140,6 +2170,7 @@ ASErr ProcessDuctworkPlugin::ProcessDuctwork(const ProcessDuctworkOptions& optio
 		DuctworkLog::Write("Emory bodies deleted=" + std::to_string(deletedEmoryBodies));
 		emoryCleanupTimer.LogElapsed();
 	}
+	LogUndoTransactions("after-emory-cleanup");
 
 	OrthoResult orthoResult = {};
 	if (!options.skipOrtho && !ductworkPaths.empty()) {
@@ -2264,6 +2295,7 @@ ASErr ProcessDuctworkPlugin::ProcessDuctwork(const ProcessDuctworkOptions& optio
 	} else {
 		DuctworkLog::Write("Parts skipped");
 	}
+	LogUndoTransactions("after-parts");
 
 	if (options.enableRegisterCarve || options.enableOverlapCarve) {
 		StepTimer carveTimer("Carve");
@@ -2386,6 +2418,7 @@ ASErr ProcessDuctworkPlugin::ProcessDuctwork(const ProcessDuctworkOptions& optio
 		DuctworkLog::Write(stream.str());
 		emoryBodyTimer.LogElapsed();
 	}
+	LogUndoTransactions("after-emory-bodies");
 
 	if (outParam) {
 		*outParam = ai::UnicodeString::FromUTF8("");
@@ -2413,6 +2446,7 @@ ASErr ProcessDuctworkPlugin::ProcessDuctwork(const ProcessDuctworkOptions& optio
 		SelectArtList(selectionToRestore);
 		finalizeTimer.LogElapsed();
 	}
+	LogUndoTransactions("process-end");
 	totalTimer.LogElapsed();
 	DuctworkLog::Write("EmoryDuctwork complete");
 	return kNoErr;

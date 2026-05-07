@@ -1311,7 +1311,6 @@
         }
         panelFileLog('[PANEL] ProcessPlaced click');
         htmlLog('[PANEL] ProcessPlaced click');
-        csInterface.evalScript('MDUX_debugLog("[PANEL] Process Ductwork button clicked")', function() {});
         setProcessStatus('Processing ductwork (Placed)...');
 
         try {
@@ -1344,7 +1343,6 @@
                 enableOverlapCarve: !!(processCarveOverlapsOption && processCarveOverlapsOption.checked)
             });
             const escaped = escapeForExtendScript(payload);
-            csInterface.evalScript('MDUX_debugLog("[PANEL] Process payload: ' + escaped + '")', function() {});
             htmlLog('[PANEL] calling MDUX_cppProcessPlacedApi');
             const result = normaliseResult(await evalScript('MDUX_cppProcessPlacedApi("' + escaped + '")'));
             htmlLog('[PANEL] MDUX_cppProcessPlacedApi result ok=' + (result && result.ok ? 'true' : 'false'));
@@ -1362,7 +1360,6 @@
             }
         } finally {
             processPlacedBtn.disabled = false;
-            scheduleSkipOrthoRefresh();
         }
     }
 

@@ -28,6 +28,7 @@ extern "C" {
 	AIAnnotatorSuite* sAIAnnotator = NULL;
 	AIAnnotatorDrawerSuite* sAIAnnotatorDrawer = NULL;
 	AICSXSExtensionSuite* sAICSXSExtension = NULL;
+	AIUndoSuite* sAIUndo = NULL;
 }
 
 ImportSuite gImportSuites[] =
@@ -58,6 +59,6 @@ ImportSuite gImportSuites[] =
 	kAIAnnotatorSuite, kAIAnnotatorSuiteVersion, &sAIAnnotator,
 	kAIAnnotatorDrawerSuite, kAIAnnotatorDrawerSuiteVersion, &sAIAnnotatorDrawer,
 	kAICSXSExtensionSuite, kAICSXSExtensionSuiteVersion, &sAICSXSExtension,
+	kAIUndoSuite, kAIUndoSuiteVersion, &sAIUndo,
 	nullptr, 0, nullptr
 };
-

@@ -30,6 +30,7 @@
 #include "AIAnnotator.h"
 #include "AIAnnotatorDrawer.h"
 #include "AICSXSExtension.h"
+#include "AIUndo.h"
 
 extern "C" SPBlocksSuite* sSPBlocks;
 extern "C" AIMenuSuite* sAIMenu;
@@ -59,6 +60,6 @@ extern "C" AIFilePathSuite* sAIFilePath;
 extern "C" AIAnnotatorSuite* sAIAnnotator;
 extern "C" AIAnnotatorDrawerSuite* sAIAnnotatorDrawer;
 extern "C" AICSXSExtensionSuite* sAICSXSExtension;
+extern "C" AIUndoSuite* sAIUndo;
 
 #endif // __ProcessDuctworkSUITES_H__
-
