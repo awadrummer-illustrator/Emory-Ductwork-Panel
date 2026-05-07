@@ -7049,6 +7049,25 @@ void ClearStartSegmentIndex(AIArtHandle sourceArt)
 		state.selectedSeed = true;
 	}
 
+	void ApplyUniformWidthToPathState(EmorySourceState& state, const std::vector<int>& selectedSegmentIndices, double newWidth)
+	{
+		if (selectedSegmentIndices.empty() || state.segmentCount <= 0) {
+			return;
+		}
+
+		if (SelectionCoversEverySegment(state, selectedSegmentIndices)) {
+			int anchorSegment = state.startSegmentIndex;
+			if (anchorSegment < 0 || anchorSegment >= state.segmentCount) {
+				anchorSegment = 0;
+			}
+			std::vector<int> anchorOnly(1, anchorSegment);
+			ApplySelectedWidthToPathState(state, anchorOnly, newWidth);
+			return;
+		}
+
+		ApplySelectedWidthToPathState(state, selectedSegmentIndices, newWidth);
+	}
+
 	bool PropagateWidthToBranchState(const EmorySourceState& upstreamState,
 		const PathConnectionAttachment& upstreamAttachment,
 		EmorySourceState& branchState,
@@ -12237,11 +12256,9 @@ bool DuctworkGeometry::ApplySelectedEmorySegmentWidth(double newWidth, std::stri
 		}
 	}
 
-	if (totalSelectedCount > 1 && selectedWidthsAreMixed && mixedSelectionReferenceWidth > kPointEpsilon) {
-		double mixedSelectionScale = newWidth / mixedSelectionReferenceWidth;
-		if (std::isfinite(mixedSelectionScale) && mixedSelectionScale > 0.0) {
-			fullSelectionScale = mixedSelectionScale;
-		}
+	const bool forceUniformMixedSelection = selectedIndicesByState.size() > 1 && selectedWidthsAreMixed;
+	if (forceUniformMixedSelection) {
+		fullSelectionScale = 0.0;
 	}
 
 	{
@@ -12250,6 +12267,7 @@ bool DuctworkGeometry::ApplySelectedEmorySegmentWidth(double newWidth, std::stri
 			<< " states=" << selectedIndicesByState.size()
 			<< " fullCovered=" << (selectedRunsAreFullyCovered ? 1 : 0)
 			<< " mixedWidths=" << (selectedWidthsAreMixed ? 1 : 0)
+			<< " uniformMixed=" << (forceUniformMixedSelection ? 1 : 0)
 			<< " proportionalScale=" << fullSelectionScale;
 		DuctworkLog::WriteAlways(logStream.str());
 	}
@@ -12258,6 +12276,8 @@ bool DuctworkGeometry::ApplySelectedEmorySegmentWidth(double newWidth, std::stri
 	for (std::map<int, std::vector<int> >::const_iterator it = selectedIndicesByState.begin(); it != selectedIndicesByState.end(); ++it) {
 		if (fullSelectionScale > 0.0) {
 			ApplyProportionalWidthScaleToPathState(states[it->first], fullSelectionScale);
+		} else if (forceUniformMixedSelection) {
+			ApplyUniformWidthToPathState(states[it->first], it->second, newWidth);
 		} else {
 			ApplySelectedWidthToPathState(states[it->first], it->second, newWidth);
 		}

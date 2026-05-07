@@ -125,6 +125,30 @@ namespace
 		DuctworkLog::Write(stream.str());
 	}
 
+	class UndoSilentScope
+	{
+	public:
+		UndoSilentScope()
+		{
+			if (!sAIUndo) {
+				return;
+			}
+			if (sAIUndo->IsSilent(&mWasSilent) != kNoErr) {
+				mWasSilent = false;
+			}
+			mActive = sAIUndo->SetSilent(true) == kNoErr;
+		}
+		~UndoSilentScope()
+		{
+			if (mActive && sAIUndo) {
+				sAIUndo->SetSilent(mWasSilent);
+			}
+		}
+	private:
+		AIBoolean mWasSilent = false;
+		bool mActive = false;
+	};
+
 	class RotationOverrideScope
 	{
 	public:
@@ -2426,24 +2450,21 @@ ASErr ProcessDuctworkPlugin::ProcessDuctwork(const ProcessDuctworkOptions& optio
 	if (sAIDocument) {
 		StepTimer finalizeTimer("Finalize");
 		std::vector<AIArtHandle> finalizePaths;
-		std::vector<AIArtHandle> warmPaths;
-		CollectDuctworkLayerPaths(warmPaths);
-		finalizePaths = warmPaths;
+		CollectDuctworkLayerPaths(finalizePaths);
 		FinalizeArtCaches(finalizePaths);
 		if (!finalizePaths.empty()) {
 			DuctworkLog::Write("Finalize caches paths=" + std::to_string(finalizePaths.size()));
-		}
-		if (!warmPaths.empty()) {
-			DuctworkLog::Write("Warm selection paths=" + std::to_string(warmPaths.size()));
-			ClearSelection();
-			SelectArtList(warmPaths);
 		}
 		sAIDocument->SyncDocument();
 		sAIDocument->RedrawDocument();
 		std::vector<AIArtHandle> selectionToRestore;
 		FilterValidArtList(selectionSnapshot, selectionToRestore);
-		ClearSelection();
-		SelectArtList(selectionToRestore);
+		{
+			UndoSilentScope selectionUndoScope;
+			ClearSelection();
+			SelectArtList(selectionToRestore);
+		}
+		DuctworkLog::Write("Finalize restored selection paths=" + std::to_string(selectionToRestore.size()));
 		finalizeTimer.LogElapsed();
 	}
 	LogUndoTransactions("process-end");
