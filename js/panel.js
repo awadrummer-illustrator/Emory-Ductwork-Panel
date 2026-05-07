@@ -69,6 +69,7 @@
     let processBtn = document.getElementById('process-btn');
     let processPlacedBtn = document.getElementById('process-placed-btn');
     let toggleConnectorStyleBtn = document.getElementById('toggle-connector-style-btn');
+    let markOverlapSeparateBtn = document.getElementById('mark-overlap-separate-btn');
     let setEmoryStartBtn = document.getElementById('set-emory-start-btn');
     let emoryWidthSlider = document.getElementById('emory-width-slider');
     let emoryWidthInput = document.getElementById('emory-width-input');
@@ -98,6 +99,7 @@
         processBtn = document.getElementById('process-btn');
         processPlacedBtn = document.getElementById('process-placed-btn');
         toggleConnectorStyleBtn = document.getElementById('toggle-connector-style-btn');
+        markOverlapSeparateBtn = document.getElementById('mark-overlap-separate-btn');
         setEmoryStartBtn = document.getElementById('set-emory-start-btn');
         emoryWidthSlider = document.getElementById('emory-width-slider');
         emoryWidthInput = document.getElementById('emory-width-input');
@@ -1386,6 +1388,27 @@
         }
     }
 
+    async function handleMarkOverlapSeparateClick() {
+        if (!markOverlapSeparateBtn) return;
+        markOverlapSeparateBtn.disabled = true;
+        setProcessStatus('Marking selected connector as separate runs...');
+        try {
+            await ensureBridgeLoaded();
+            const result = parseBridgeJsonResult(await evalScript('MDUX_cppMarkSelectedEmoryConnectorSeparate()'));
+            if (result && result.ok !== false) {
+                setProcessStatus(result.message || 'Connector marked as separate runs.');
+            } else {
+                setProcessStatus('Error: ' + (result && result.message ? result.message : 'Unable to mark connector as separate.'), true);
+            }
+        } catch (e) {
+            setProcessStatus('Error: ' + e.message, true);
+        } finally {
+            markOverlapSeparateBtn.disabled = false;
+            scheduleEmorySelectionRefresh(true);
+            scheduleSkipOrthoRefresh();
+        }
+    }
+
     async function handleSetEmoryStartClick() {
         if (!setEmoryStartBtn) return;
         setEmoryStartBtn.disabled = true;
@@ -2244,6 +2267,7 @@
         if (processBtn) processBtn.addEventListener('click', handleProcessClick);
         if (processPlacedBtn) processPlacedBtn.addEventListener('click', handleProcessPlacedApiClick);
         if (toggleConnectorStyleBtn) toggleConnectorStyleBtn.addEventListener('click', handleToggleConnectorStyleClick);
+        if (markOverlapSeparateBtn) markOverlapSeparateBtn.addEventListener('click', handleMarkOverlapSeparateClick);
         if (setEmoryStartBtn) setEmoryStartBtn.addEventListener('click', handleSetEmoryStartClick);
         if (processEmoryBtn) processEmoryBtn.addEventListener('click', handleProcessEmoryClick);
         if (emoryWidthSlider && emoryWidthInput) {

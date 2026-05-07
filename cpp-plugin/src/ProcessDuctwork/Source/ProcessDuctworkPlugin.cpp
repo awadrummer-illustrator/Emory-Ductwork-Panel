@@ -491,6 +491,24 @@ namespace
 		return false;
 	}
 
+	bool IsBranchRunLayerName(const std::string& layerName)
+	{
+		return layerName == "Green Ductwork" ||
+			layerName == "Light Green Ductwork" ||
+			layerName == "Light Orange Ductwork";
+	}
+
+	std::string ResolveMainRunLayerForBranch(const std::string& layerName)
+	{
+		if (layerName == "Light Orange Ductwork") {
+			return "Orange Ductwork";
+		}
+		if (layerName == "Green Ductwork" || layerName == "Light Green Ductwork") {
+			return "Blue Ductwork";
+		}
+		return std::string();
+	}
+
 	void AppendUnitEndpointPairs(const std::vector<DuctworkPath>& paths,
 		double closeDist,
 		std::vector<DuctworkConnection>& outConnections)
@@ -639,36 +657,36 @@ namespace
 				continue;
 			}
 			const std::string& layerName = selected[i].layerName;
-			bool isGreenLayer = (layerName == "Green Ductwork" || layerName == "Light Green Ductwork");
-			if (isGreenLayer) {
-				bool hasBlueEndpointJoin = false;
+			if (IsBranchRunLayerName(layerName)) {
+				bool hasMainEndpointJoin = false;
+				const std::string mainLayerName = ResolveMainRunLayerForBranch(layerName);
 				const double maxDist = 2.0;
 				const double maxDist2 = maxDist * maxDist;
 				for (size_t p = 0; p < allPaths.size(); ++p) {
-					if (allPaths[p].layerName != "Blue Ductwork") {
+					if (mainLayerName.empty() || allPaths[p].layerName != mainLayerName) {
 						continue;
 					}
 					if (allPaths[p].points.size() < 2) {
 						continue;
 					}
-					const DuctworkPoint bluePts[2] = { allPaths[p].points.front(), allPaths[p].points.back() };
-					const DuctworkPoint greenPts[2] = { selected[i].points.front(), selected[i].points.back() };
-					for (int gi = 0; gi < 2 && !hasBlueEndpointJoin; ++gi) {
+					const DuctworkPoint mainPts[2] = { allPaths[p].points.front(), allPaths[p].points.back() };
+					const DuctworkPoint branchPts[2] = { selected[i].points.front(), selected[i].points.back() };
+					for (int gi = 0; gi < 2 && !hasMainEndpointJoin; ++gi) {
 						for (int bi = 0; bi < 2; ++bi) {
-							if (DuctworkMath::Dist2(greenPts[gi], bluePts[bi]) <= maxDist2) {
-								hasBlueEndpointJoin = true;
+							if (DuctworkMath::Dist2(branchPts[gi], mainPts[bi]) <= maxDist2) {
+								hasMainEndpointJoin = true;
 								break;
 							}
 						}
 					}
-					if (hasBlueEndpointJoin) {
+					if (hasMainEndpointJoin) {
 						break;
 					}
 				}
 
-				const std::string role = hasBlueEndpointJoin ? "branch" : "trunk";
+				const std::string role = hasMainEndpointJoin ? "branch" : "trunk";
 				DuctworkMetadata::SetString(art, "ductRole", role);
-				DuctworkMetadata::SetString(art, "ductRoleReason", "blue-endpoint");
+				DuctworkMetadata::SetString(art, "ductRoleReason", "main-endpoint");
 				DuctworkMetadata::SetDouble(art, "ductRoleVersion", 1.0);
 				continue;
 			}
@@ -1051,6 +1069,17 @@ ASErr ProcessDuctworkPlugin::Message(char* caller, char* selector, void* message
 				if (action == "toggle-connector-style") {
 					std::string messageText;
 					const bool ok = DuctworkGeometry::ToggleSelectedEmoryConnectorStyles(messageText);
+					std::ostringstream out;
+					out << "{\"ok\":" << (ok ? "true" : "false")
+						<< ",\"message\":\"" << messageText << "\"}";
+					msg->outParam = ai::UnicodeString::FromUTF8(out.str());
+					SendEventToPanel("com.emory.operation.complete", out.str().c_str());
+					return kNoErr;
+				}
+
+				if (action == "mark-overlap-separate") {
+					std::string messageText;
+					const bool ok = DuctworkGeometry::MarkSelectedEmoryConnectorSeparate(messageText);
 					std::ostringstream out;
 					out << "{\"ok\":" << (ok ? "true" : "false")
 						<< ",\"message\":\"" << messageText << "\"}";

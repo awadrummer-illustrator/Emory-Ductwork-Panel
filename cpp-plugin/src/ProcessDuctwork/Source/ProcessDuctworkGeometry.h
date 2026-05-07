@@ -47,6 +47,7 @@ namespace DuctworkGeometry
 	size_t DeleteGeneratedEmoryBodies(const std::vector<std::string>& sourceIds);
 	EmoryBodyStats GenerateEmoryBodies(const std::vector<DuctworkPath>& paths);
 	bool ToggleSelectedEmoryConnectorStyles(std::string& outMessage);
+	bool MarkSelectedEmoryConnectorSeparate(std::string& outMessage);
 	bool ToggleSelectedEmoryTerminalSegmentStyle(std::string& outMessage);
 	bool SetSelectedEmoryTerminalSegmentStyle(const std::string& targetStyle, std::string& outMessage);
 	bool GetSelectedEmorySegmentState(std::string& outJson);

@@ -2207,7 +2207,9 @@ function MDUX_runEmoryDuctwork(createRegisterWires) {
         $.writeln("[EMORY] Placing register images at anchors based on layer");
         var registerLayerMap = {
             "Square Registers": "Square Register Emory",
-            "Rectangular Registers": "Rectangular Register Emory"
+            "Rectangular Registers": "Rectangular Register Emory",
+            "Exhaust Registers": "Exhaust Register",
+            "Secondary Exhaust Registers": "Secondary Exhaust Register"
         };
 
         for (var layerName in registerLayerMap) {
@@ -2318,7 +2320,7 @@ function MDUX_runEmoryDuctwork(createRegisterWires) {
             }
 
             // Find register anchor points on register layers
-            var registerLayerNames = ["Square Registers", "Rectangular Registers", "Registers"];
+            var registerLayerNames = ["Square Registers", "Rectangular Registers", "Exhaust Registers", "Secondary Exhaust Registers", "Registers"];
             for (var layerIdx = 0; layerIdx < registerLayerNames.length; layerIdx++) {
                 var layerName = registerLayerNames[layerIdx];
                 var registerLayer = null;
@@ -4276,6 +4278,19 @@ function MDUX_cppToggleSelectedEmoryConnector() {
     }
 }
 
+function MDUX_cppMarkSelectedEmoryConnectorSeparate() {
+    try {
+        if (app.documents.length === 0) {
+            return JSON.stringify({ ok: false, message: "No document open." });
+        }
+        var payload = "action=mark-overlap-separate";
+        var result = app.sendScriptMessage("EmoryDuctwork", "EmoryDuctworkPanel", payload);
+        return result || JSON.stringify({ ok: false, message: "No response from C++ panel." });
+    } catch (e) {
+        return JSON.stringify({ ok: false, message: "C++ mark separate connector error: " + e });
+    }
+}
+
 function MDUX_cppGetSelectedEmorySegmentState() {
     try {
         if (app.documents.length === 0) {
@@ -5911,7 +5926,7 @@ function MDUX_carveForRegistersOnly() {
         var carvedCount = 0;
 
         // Get register positions from register layers
-        var registerLayers = ["Square Registers", "Rectangular Registers"];
+        var registerLayers = ["Square Registers", "Rectangular Registers", "Exhaust Registers", "Secondary Exhaust Registers"];
         var registerCenters = [];
 
         for (var layerIdx = 0; layerIdx < registerLayers.length; layerIdx++) {
@@ -6216,7 +6231,7 @@ function MDUX_orthoFinalOnly() {
         var doc = app.activeDocument;
 
         // Get register positions to identify final segments
-        var registerLayers = ["Square Registers", "Rectangular Registers", "Circular Registers"];
+        var registerLayers = ["Square Registers", "Rectangular Registers", "Circular Registers", "Exhaust Registers", "Secondary Exhaust Registers"];
         var registerPositions = [];
 
         for (var layerIdx = 0; layerIdx < registerLayers.length; layerIdx++) {

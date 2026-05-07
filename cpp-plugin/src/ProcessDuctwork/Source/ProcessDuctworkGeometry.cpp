@@ -1,4 +1,5 @@
 #include "IllustratorSDK.h"
+#include "ProcessDuctworkArt.h"
 #include "ProcessDuctworkConstants.h"
 #include "ProcessDuctworkConnections.h"
 #include "ProcessDuctworkGeometry.h"
@@ -277,6 +278,7 @@ namespace
 	void SimplifyOpenPathCollinearPoints(std::vector<DuctworkPoint>& points);
 	void UpdateEmoryTokens(AIArtHandle art, const std::string& role, const std::string& sourceId);
 	void SetCenterlineHidden(AIArtHandle art, bool hidden);
+	bool ComputeArtCenterPoint(AIArtHandle art, DuctworkPoint& outCenter);
 
 	AIColor MakeRGBColor(int red, int green, int blue)
 	{
@@ -767,6 +769,78 @@ namespace
 			}
 		}
 		return false;
+	}
+
+	AILayerHandle GetOrCreateAnchorLayer(const char* name)
+	{
+		if (!name || !sAILayer) {
+			return nullptr;
+		}
+
+		AILayerHandle layer = DuctworkArt::FindLayerByTitle(name);
+		if (layer) {
+			return layer;
+		}
+
+		if (sAILayer->InsertLayer(nullptr, kPlaceAboveAll, &layer) != kNoErr || !layer) {
+			return nullptr;
+		}
+
+		sAILayer->SetLayerTitle(layer, ai::UnicodeString::FromUTF8(name));
+		return layer;
+	}
+
+	bool CreateIgnoreConnectionAnchor(const DuctworkPoint& point)
+	{
+		if (!sAIArt || !sAIPath) {
+			return false;
+		}
+
+		AILayerHandle layer = GetOrCreateAnchorLayer("Ignored");
+		if (!layer) {
+			layer = GetOrCreateAnchorLayer("Ignore");
+		}
+		if (!layer || !DuctworkArt::IsLayerChainEditableVisible(layer)) {
+			return false;
+		}
+
+		AIArtHandle group = nullptr;
+		if (sAIArt->GetFirstArtOfLayer(layer, &group) != kNoErr || !group) {
+			return false;
+		}
+
+		AIArtHandle path = nullptr;
+		if (sAIArt->NewArt(kPathArt, kPlaceInsideOnTop, group, &path) != kNoErr || !path) {
+			return false;
+		}
+
+		if (sAIPath->SetPathSegmentCount(path, 1) != kNoErr) {
+			return false;
+		}
+
+		AIPathSegment segment;
+		segment.p.h = static_cast<AIReal>(point.x);
+		segment.p.v = static_cast<AIReal>(point.y);
+		segment.in = segment.p;
+		segment.out = segment.p;
+		segment.corner = true;
+		if (sAIPath->SetPathSegments(path, 0, 1, &segment) != kNoErr) {
+			return false;
+		}
+
+		if (sAIPathStyle) {
+			AIPathStyle style;
+			AIBoolean fillVisible = false;
+			AIBoolean strokeVisible = false;
+			if (sAIPathStyle->GetPathStyleEx(path, &style, &fillVisible, &strokeVisible) == kNoErr) {
+				fillVisible = false;
+				strokeVisible = false;
+				sAIPathStyle->SetPathStyleEx(path, &style, fillVisible, strokeVisible);
+			}
+		}
+
+		DuctworkNotes::SetNote(path, "MD:POINT_ROT=0");
+		return true;
 	}
 
 	bool EndpointHasAnyCenterlineConnection(const std::vector<DuctworkConnection>& connections,
@@ -3319,6 +3393,100 @@ namespace
 		std::vector<std::string> linkedSourceIds;
 		ReadLinkedSourceIds(art, linkedSourceIds);
 		return linkedSourceIds.size() > 1;
+	}
+
+	void CollectConnectionParticipantSourceIds(const DuctworkConnection& connection,
+		const std::vector<EmorySourceState>& states,
+		std::set<std::string>& outSourceIds)
+	{
+		outSourceIds.clear();
+		if (connection.a >= 0 && connection.a < static_cast<int>(states.size()) &&
+			!states[connection.a].sourceId.empty()) {
+			outSourceIds.insert(states[connection.a].sourceId);
+		}
+		if (connection.b >= 0 && connection.b < static_cast<int>(states.size()) &&
+			!states[connection.b].sourceId.empty()) {
+			outSourceIds.insert(states[connection.b].sourceId);
+		}
+	}
+
+	bool ParticipantSourceIdsMatchConnector(const std::set<std::string>& participants,
+		const std::set<std::string>& connectorSourceIds)
+	{
+		if (participants.empty()) {
+			return false;
+		}
+		if (connectorSourceIds.empty()) {
+			return true;
+		}
+
+		bool sharesSource = false;
+		for (std::set<std::string>::const_iterator it = participants.begin(); it != participants.end(); ++it) {
+			if (connectorSourceIds.find(*it) == connectorSourceIds.end()) {
+				return false;
+			}
+			sharesSource = true;
+		}
+		return sharesSource;
+	}
+
+	bool ResolveNetworkConnectorIgnoreTarget(AIArtHandle connectorArt,
+		const std::vector<EmorySourceState>& states,
+		const std::vector<DuctworkConnection>& connections,
+		std::set<std::string>& ioConnectorSourceIds,
+		DuctworkPoint& outPoint,
+		bool& outMatchedConnection)
+	{
+		outMatchedConnection = false;
+		if (!connectorArt) {
+			return false;
+		}
+
+		DuctworkPoint connectorCenter;
+		if (!ComputeArtCenterPoint(connectorArt, connectorCenter)) {
+			return false;
+		}
+
+		bool foundConnection = false;
+		double bestDist2 = 0.0;
+		DuctworkPoint bestPoint = connectorCenter;
+		std::set<std::string> bestParticipantIds;
+
+		for (size_t i = 0; i < connections.size(); ++i) {
+			const DuctworkConnection& connection = connections[i];
+			if (connection.type != kConnectionEndpointToSegment &&
+				connection.type != kConnectionSegmentIntersection) {
+				continue;
+			}
+
+			std::set<std::string> participantIds;
+			CollectConnectionParticipantSourceIds(connection, states, participantIds);
+			if (!ParticipantSourceIdsMatchConnector(participantIds, ioConnectorSourceIds)) {
+				continue;
+			}
+
+			const double dist2 = DuctworkMath::Dist2(connectorCenter, connection.point);
+			if (!foundConnection || dist2 < bestDist2) {
+				foundConnection = true;
+				bestDist2 = dist2;
+				bestPoint = connection.point;
+				bestParticipantIds = participantIds;
+			}
+		}
+
+		if (foundConnection) {
+			ioConnectorSourceIds.insert(bestParticipantIds.begin(), bestParticipantIds.end());
+			outPoint = bestPoint;
+			outMatchedConnection = true;
+			return !ioConnectorSourceIds.empty();
+		}
+
+		if (ioConnectorSourceIds.empty()) {
+			return false;
+		}
+
+		outPoint = connectorCenter;
+		return true;
 	}
 
 	size_t CountSerializedSegmentWidths(const std::string& serialized)
@@ -9251,6 +9419,178 @@ bool DuctworkGeometry::ToggleSelectedEmoryConnectorStyles(std::string& outMessag
 		message << "s";
 	}
 	message << ". Rebuilt " << stats.segmentsCreated << " segments and " << stats.connectorsCreated << " connectors.";
+	outMessage = message.str();
+	return true;
+}
+
+bool DuctworkGeometry::MarkSelectedEmoryConnectorSeparate(std::string& outMessage)
+{
+	outMessage = "Select one or more generated Emory tee/cross connectors first.";
+	if (!sAIArt || !sAILayer || !sAIPath) {
+		outMessage = "Illustrator SDK is not available.";
+		return false;
+	}
+
+	NormalizeDuplicateEmorySourceIds();
+
+	std::vector<AIArtHandle> selection;
+	DuctworkSelection::CollectSelectedPaths(selection);
+	if (selection.empty()) {
+		return false;
+	}
+
+	std::vector<EmorySourceState> states;
+	std::map<std::string, int> stateIndexBySourceId;
+	if (!CollectEmorySourceStates(states, stateIndexBySourceId) || states.size() < 2) {
+		outMessage = "No Emory source runs were found to separate.";
+		return false;
+	}
+
+	std::vector<DuctworkConnection> connections;
+	CollectEmoryNetworkConnections(states, connections);
+
+	struct SeparateTarget
+	{
+		DuctworkPoint point;
+		std::set<std::string> sourceIds;
+		bool matchedConnection = false;
+	};
+
+	std::vector<SeparateTarget> targets;
+	std::set<std::string> affectedSourceIds;
+	size_t selectedConnectorCount = 0;
+	size_t fallbackPointCount = 0;
+
+	for (size_t i = 0; i < selection.size(); ++i) {
+		AIArtHandle connectorArt = selection[i];
+		if (!connectorArt || !IsNetworkConnectorArt(connectorArt)) {
+			continue;
+		}
+		++selectedConnectorCount;
+
+		std::set<std::string> connectorSourceIds;
+		CollectArtAssociatedSourceIds(connectorArt, connectorSourceIds);
+
+		DuctworkPoint ignorePoint;
+		bool matchedConnection = false;
+		if (!ResolveNetworkConnectorIgnoreTarget(connectorArt,
+			states,
+			connections,
+			connectorSourceIds,
+			ignorePoint,
+			matchedConnection) ||
+			connectorSourceIds.empty()) {
+			continue;
+		}
+
+		if (!matchedConnection) {
+			++fallbackPointCount;
+		}
+
+		bool duplicateTarget = false;
+		for (size_t targetIndex = 0; targetIndex < targets.size(); ++targetIndex) {
+			if (DuctworkMath::Dist2(targets[targetIndex].point, ignorePoint) <= 16.0) {
+				targets[targetIndex].sourceIds.insert(connectorSourceIds.begin(), connectorSourceIds.end());
+				duplicateTarget = true;
+				break;
+			}
+		}
+		if (duplicateTarget) {
+			affectedSourceIds.insert(connectorSourceIds.begin(), connectorSourceIds.end());
+			continue;
+		}
+
+		SeparateTarget target;
+		target.point = ignorePoint;
+		target.sourceIds = connectorSourceIds;
+		target.matchedConnection = matchedConnection;
+		targets.push_back(target);
+		affectedSourceIds.insert(connectorSourceIds.begin(), connectorSourceIds.end());
+	}
+
+	if (targets.empty() || affectedSourceIds.empty()) {
+		if (selectedConnectorCount == 0) {
+			return false;
+		}
+		outMessage = "Unable to resolve the selected Emory connector intersection.";
+		return false;
+	}
+
+	std::vector<DuctworkPoint> existingIgnorePoints;
+	CollectIgnoreAnchorPoints(existingIgnorePoints);
+
+	size_t anchorsCreated = 0;
+	size_t alreadyMarked = 0;
+	size_t anchorsFailed = 0;
+	for (size_t i = 0; i < targets.size(); ++i) {
+		if (IsPointNearAny(targets[i].point, existingIgnorePoints, 4.0)) {
+			++alreadyMarked;
+			continue;
+		}
+
+		if (CreateIgnoreConnectionAnchor(targets[i].point)) {
+			existingIgnorePoints.push_back(targets[i].point);
+			++anchorsCreated;
+		} else {
+			++anchorsFailed;
+		}
+	}
+
+	if (anchorsCreated == 0 && alreadyMarked == 0) {
+		outMessage = "Unable to create the separation marker. Check that the Ignored layer is visible and unlocked.";
+		return false;
+	}
+
+	std::vector<std::string> sourceIds;
+	std::vector<DuctworkPath> regeneratePaths;
+	for (size_t i = 0; i < states.size(); ++i) {
+		if (states[i].sourceId.empty() || affectedSourceIds.find(states[i].sourceId) == affectedSourceIds.end()) {
+			continue;
+		}
+		sourceIds.push_back(states[i].sourceId);
+		regeneratePaths.push_back(states[i].path);
+	}
+
+	if (sourceIds.empty() || regeneratePaths.empty()) {
+		outMessage = "Marked the separation point, but could not find the source runs to rebuild.";
+		return false;
+	}
+
+	std::sort(sourceIds.begin(), sourceIds.end());
+	sourceIds.erase(std::unique(sourceIds.begin(), sourceIds.end()), sourceIds.end());
+	DeleteGeneratedEmoryBodies(sourceIds);
+	EmoryBodyStats stats = GenerateEmoryBodies(regeneratePaths);
+
+	{
+		std::ostringstream logStream;
+		logStream << "Emory separate-network-connectors selected=" << selectedConnectorCount
+			<< " targets=" << targets.size()
+			<< " anchorsCreated=" << anchorsCreated
+			<< " alreadyMarked=" << alreadyMarked
+			<< " anchorsFailed=" << anchorsFailed
+			<< " fallbackPoints=" << fallbackPointCount
+			<< " rebuiltSources=" << sourceIds.size();
+		for (size_t i = 0; i < targets.size(); ++i) {
+			logStream << " target" << i << "=" << SerializePointForLog(targets[i].point)
+				<< " matched=" << (targets[i].matchedConnection ? 1 : 0);
+		}
+		DuctworkLog::Write(logStream.str());
+	}
+
+	std::ostringstream message;
+	message << "Marked " << (anchorsCreated + alreadyMarked) << " connector intersection";
+	if ((anchorsCreated + alreadyMarked) != 1) {
+		message << "s";
+	}
+	message << " as separate runs. Rebuilt " << stats.segmentsCreated
+		<< " segments and " << stats.connectorsCreated << " connectors.";
+	if (anchorsFailed > 0) {
+		message << " " << anchorsFailed << " marker";
+		if (anchorsFailed != 1) {
+			message << "s";
+		}
+		message << " could not be created.";
+	}
 	outMessage = message.str();
 	return true;
 }
