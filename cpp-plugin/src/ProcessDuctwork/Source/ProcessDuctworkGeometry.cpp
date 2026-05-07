@@ -6076,6 +6076,114 @@ void ClearStartSegmentIndex(AIArtHandle sourceArt)
 		return ductRole == "branch";
 	}
 
+	bool LayerListContains(const std::vector<std::string>& layerNames, const std::string& layerName)
+	{
+		for (size_t i = 0; i < layerNames.size(); ++i) {
+			if (layerNames[i] == layerName) {
+				return true;
+			}
+		}
+		return false;
+	}
+
+	bool IsUnitPairTransitionToMain(const std::string& transitionLayer, const std::string& mainLayer)
+	{
+		if (!IsGreenOrLightOrangeRunLayer(transitionLayer) || !IsBlueOrOrangeRunLayer(mainLayer)) {
+			return false;
+		}
+
+		std::vector<std::string> pairedLayers;
+		GetPairedUnitRunLayers(transitionLayer, pairedLayers);
+		return LayerListContains(pairedLayers, mainLayer);
+	}
+
+	bool ResolveUnitPairEndpointConnection(const DuctworkConnection& connection,
+		const std::vector<EmorySourceState>& states,
+		const std::vector<DuctworkPoint>& unitAttachmentPoints,
+		int& outMainIndex,
+		PathConnectionAttachment& outMainAttachment,
+		int& outTransitionIndex,
+		PathConnectionAttachment& outTransitionAttachment)
+	{
+		outMainIndex = -1;
+		outTransitionIndex = -1;
+		outMainAttachment = PathConnectionAttachment();
+		outTransitionAttachment = PathConnectionAttachment();
+		if (connection.type != kConnectionEndpointToEndpoint ||
+			connection.a < 0 || connection.a >= static_cast<int>(states.size()) ||
+			connection.b < 0 || connection.b >= static_cast<int>(states.size()) ||
+			unitAttachmentPoints.empty() ||
+			!IsPointNearAny(connection.point, unitAttachmentPoints, 10.0)) {
+			return false;
+		}
+
+		const EmorySourceState& stateA = states[connection.a];
+		const EmorySourceState& stateB = states[connection.b];
+		if (IsUnitPairTransitionToMain(stateA.path.layerName, stateB.path.layerName)) {
+			outTransitionIndex = connection.a;
+			outMainIndex = connection.b;
+		} else if (IsUnitPairTransitionToMain(stateB.path.layerName, stateA.path.layerName)) {
+			outTransitionIndex = connection.b;
+			outMainIndex = connection.a;
+		} else {
+			return false;
+		}
+
+		if (!DescribeConnectionForPath(connection, outMainIndex, states[outMainIndex], outMainAttachment) ||
+			!DescribeConnectionForPath(connection, outTransitionIndex, states[outTransitionIndex], outTransitionAttachment) ||
+			outMainAttachment.endpointSlot < 0 ||
+			outTransitionAttachment.endpointSlot < 0 ||
+			outMainAttachment.segmentIndex < 0 ||
+			outTransitionAttachment.segmentIndex < 0) {
+			return false;
+		}
+
+		return true;
+	}
+
+	bool SyncEndpointWidthFromState(const EmorySourceState& sourceState,
+		const PathConnectionAttachment& sourceAttachment,
+		EmorySourceState& targetState,
+		const PathConnectionAttachment& targetAttachment)
+	{
+		if (sourceAttachment.segmentIndex < 0 ||
+			sourceAttachment.segmentIndex >= static_cast<int>(sourceState.widths.size()) ||
+			targetAttachment.segmentIndex < 0 ||
+			targetAttachment.segmentIndex >= static_cast<int>(targetState.widths.size()) ||
+			targetState.widths.size() != targetState.originalWidths.size()) {
+			return false;
+		}
+
+		double matchedWidth = sourceState.widths[sourceAttachment.segmentIndex];
+		if (!std::isfinite(matchedWidth) || matchedWidth < kMinDuctWidth) {
+			matchedWidth = kMinDuctWidth;
+		}
+
+		std::vector<double> updatedWidths = targetState.widths;
+		updatedWidths[targetAttachment.segmentIndex] = matchedWidth;
+		const int direction = (targetAttachment.segmentIndex == 0) ? 1 : -1;
+		ApplyCascadeFromAnchor(targetState.originalWidths, updatedWidths, targetAttachment.segmentIndex, direction);
+
+		bool changed = targetState.widths.size() != updatedWidths.size();
+		if (!changed) {
+			for (size_t i = 0; i < updatedWidths.size(); ++i) {
+				if (!NearlyEqual(targetState.widths[i], updatedWidths[i], 0.001)) {
+					changed = true;
+					break;
+				}
+			}
+		}
+		if (!changed) {
+			return false;
+		}
+
+		targetState.widths = updatedWidths;
+		targetState.originalWidths = updatedWidths;
+		targetState.defaultWidth = ResolveMaxSegmentWidth(targetState.widths, matchedWidth);
+		targetState.touched = true;
+		return true;
+	}
+
 	bool CollectEmorySourceStates(std::vector<EmorySourceState>& outStates, std::map<std::string, int>& outIndexBySourceId)
 	{
 		outStates.clear();
@@ -7058,6 +7166,29 @@ void ClearStartSegmentIndex(AIArtHandle sourceArt)
 		for (size_t pass = 0; pass < maxPasses; ++pass) {
 			bool changedThisPass = false;
 			for (size_t connectionIndex = 0; connectionIndex < connections.size(); ++connectionIndex) {
+				int unitPairMainIndex = -1;
+				int unitPairTransitionIndex = -1;
+				PathConnectionAttachment unitPairMainAttachment;
+				PathConnectionAttachment unitPairTransitionAttachment;
+				if (ResolveUnitPairEndpointConnection(connections[connectionIndex],
+					states,
+					unitAttachmentPoints,
+					unitPairMainIndex,
+					unitPairMainAttachment,
+					unitPairTransitionIndex,
+					unitPairTransitionAttachment)) {
+					if (unitPairTransitionIndex >= 0 &&
+						unitPairTransitionIndex < static_cast<int>(states.size()) &&
+						affectedSourceIds.find(states[unitPairTransitionIndex].sourceId) != affectedSourceIds.end() &&
+						SyncEndpointWidthFromState(states[unitPairMainIndex],
+							unitPairMainAttachment,
+							states[unitPairTransitionIndex],
+							unitPairTransitionAttachment)) {
+						changedThisPass = true;
+					}
+					continue;
+				}
+
 				int trunkIndex = -1;
 				int branchIndex = -1;
 				if (IsEndpointToSegmentBranchConnection(connections[connectionIndex], trunkIndex, branchIndex)) {
@@ -7195,6 +7326,44 @@ void ClearStartSegmentIndex(AIArtHandle sourceArt)
 				}
 
 				if (connection.type == kConnectionEndpointToEndpoint) {
+					int unitPairMainIndex = -1;
+					int unitPairTransitionIndex = -1;
+					PathConnectionAttachment unitPairMainAttachment;
+					PathConnectionAttachment unitPairTransitionAttachment;
+					if (ResolveUnitPairEndpointConnection(connection,
+						states,
+						unitAttachmentPoints,
+						unitPairMainIndex,
+						unitPairMainAttachment,
+						unitPairTransitionIndex,
+						unitPairTransitionAttachment)) {
+						int targetIndex = -1;
+						const PathConnectionAttachment* sourceAttachment = nullptr;
+						const PathConnectionAttachment* targetAttachment = nullptr;
+						if (currentIndex == unitPairMainIndex) {
+							targetIndex = unitPairTransitionIndex;
+							sourceAttachment = &unitPairMainAttachment;
+							targetAttachment = &unitPairTransitionAttachment;
+						} else if (currentIndex == unitPairTransitionIndex) {
+							targetIndex = unitPairMainIndex;
+							sourceAttachment = &unitPairTransitionAttachment;
+							targetAttachment = &unitPairMainAttachment;
+						}
+
+						if (targetIndex >= 0 &&
+							targetIndex < static_cast<int>(states.size()) &&
+							!states[targetIndex].selectedSeed &&
+							sourceAttachment &&
+							targetAttachment &&
+							SyncEndpointWidthFromState(states[currentIndex],
+								*sourceAttachment,
+								states[targetIndex],
+								*targetAttachment)) {
+							queue.push_back(targetIndex);
+						}
+						continue;
+					}
+
 					int neighborIndex = -1;
 					if (connection.a == currentIndex) {
 						neighborIndex = connection.b;
