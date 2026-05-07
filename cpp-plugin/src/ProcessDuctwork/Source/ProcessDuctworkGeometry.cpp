@@ -7136,6 +7136,70 @@ void ClearStartSegmentIndex(AIArtHandle sourceArt)
 		return true;
 	}
 
+	void CollectEffectiveTerminalOmittedSegmentsForState(const EmorySourceState& state, std::set<size_t>& outOmittedSegments)
+	{
+		outOmittedSegments.clear();
+		if (!state.art || state.segmentCount <= 0) {
+			return;
+		}
+
+		CollectTerminalOmittedSegments(state.art, static_cast<size_t>(state.segmentCount), outOmittedSegments);
+
+		std::vector<DuctworkPoint> fragmentPoints;
+		SanitizePolyline(state.path.points, fragmentPoints);
+		if (fragmentPoints.size() < 2) {
+			return;
+		}
+
+		std::set<size_t> backupOmittedSegments;
+		if (ResolveFragmentOmittedSegmentsFromBackup(state.sourceId, fragmentPoints, backupOmittedSegments)) {
+			outOmittedSegments.insert(backupOmittedSegments.begin(), backupOmittedSegments.end());
+		}
+	}
+
+	bool ResolveTerminalWidthControlSegmentIndex(const EmorySourceState& state,
+		int selectedSegmentIndex,
+		int& outControlSegmentIndex)
+	{
+		outControlSegmentIndex = -1;
+		if (state.segmentCount <= 0 ||
+			selectedSegmentIndex < 0 ||
+			selectedSegmentIndex >= state.segmentCount) {
+			return false;
+		}
+
+		std::set<size_t> omittedSegments;
+		CollectEffectiveTerminalOmittedSegmentsForState(state, omittedSegments);
+
+		const int lastSegmentIndex = state.segmentCount - 1;
+		const bool startOmitted = omittedSegments.find(0) != omittedSegments.end();
+		const bool endOmitted = omittedSegments.find(static_cast<size_t>(lastSegmentIndex)) != omittedSegments.end();
+
+		if (startOmitted) {
+			const int startControlIndex = (state.segmentCount > 1) ? 1 : 0;
+			if (selectedSegmentIndex == 0 || selectedSegmentIndex == startControlIndex) {
+				outControlSegmentIndex = startControlIndex;
+				return true;
+			}
+		} else if (selectedSegmentIndex == 0) {
+			outControlSegmentIndex = 0;
+			return true;
+		}
+
+		if (endOmitted) {
+			const int endControlIndex = (state.segmentCount > 1) ? (lastSegmentIndex - 1) : lastSegmentIndex;
+			if (selectedSegmentIndex == lastSegmentIndex || selectedSegmentIndex == endControlIndex) {
+				outControlSegmentIndex = endControlIndex;
+				return true;
+			}
+		} else if (selectedSegmentIndex == lastSegmentIndex) {
+			outControlSegmentIndex = lastSegmentIndex;
+			return true;
+		}
+
+		return false;
+	}
+
 	bool PropagateWidthToBranchState(const EmorySourceState& upstreamState,
 		const PathConnectionAttachment& upstreamAttachment,
 		EmorySourceState& branchState,
@@ -11079,6 +11143,113 @@ bool DuctworkGeometry::GetSelectedEmorySegmentState(std::string& outJson)
 
 	out << "}";
 	outJson = out.str();
+	return true;
+}
+
+bool DuctworkGeometry::SelectSelectedEmoryFinalSegments(std::string& outMessage)
+{
+	outMessage = "Select generated Emory ductwork first.";
+	if (!sAIArt) {
+		outMessage = "Illustrator SDK is not available.";
+		return false;
+	}
+
+	RepairVisibleFragmentSourceIdsFromBackups();
+	NormalizeDuplicateEmorySourceIds();
+
+	std::vector<AIArtHandle> selection;
+	DuctworkSelection::CollectSelectedPaths(selection);
+	if (selection.empty()) {
+		return false;
+	}
+
+	std::vector<EmorySourceState> states;
+	std::map<std::string, int> stateIndexBySourceId;
+	if (!CollectEmorySourceStates(states, stateIndexBySourceId)) {
+		outMessage = "Unable to read Emory source centerlines.";
+		return false;
+	}
+
+	std::map<int, std::vector<int> > selectedFinalIndicesByState;
+	size_t consideredGeneratedPieces = 0;
+
+	for (size_t i = 0; i < selection.size(); ++i) {
+		AIArtHandle art = selection[i];
+		if (!art || !IsGeneratedEmoryArtInternal(art)) {
+			continue;
+		}
+
+		std::string role;
+		if (!DuctworkMetadata::GetString(art, kEmoryRoleKey, role) ||
+			(role != kEmoryRoleSegment && role != kEmoryRoleGuide)) {
+			continue;
+		}
+
+		std::string sourceId;
+		if (!DuctworkMetadata::GetString(art, kEmorySourceIdKey, sourceId) || sourceId.empty()) {
+			sourceId = ReadEmorySourceIdFromNote(art);
+		}
+		if (sourceId.empty()) {
+			continue;
+		}
+
+		int segmentIndex = -1;
+		if (!ReadGeneratedSegmentIndex(art, segmentIndex)) {
+			continue;
+		}
+
+		const std::string scoringRole = (role == kEmoryRoleGuide) ? kEmoryRoleSegment : role;
+		int stateIndex = -1;
+		if (!FindBestStateIndexForGeneratedArt(art, scoringRole, sourceId, states, stateIndex) &&
+			!FindBestStateIndexForGeneratedArtLoose(art, scoringRole, states, stateIndex)) {
+			continue;
+		}
+		if (stateIndex < 0 || stateIndex >= static_cast<int>(states.size())) {
+			continue;
+		}
+
+		int controlSegmentIndex = -1;
+		if (!ResolveTerminalWidthControlSegmentIndex(states[stateIndex], segmentIndex, controlSegmentIndex)) {
+			continue;
+		}
+		if (controlSegmentIndex < 0 || controlSegmentIndex >= states[stateIndex].segmentCount) {
+			continue;
+		}
+
+		selectedFinalIndicesByState[stateIndex].push_back(controlSegmentIndex);
+		++consideredGeneratedPieces;
+	}
+
+	size_t finalSegmentCount = 0;
+	for (std::map<int, std::vector<int> >::iterator it = selectedFinalIndicesByState.begin();
+		it != selectedFinalIndicesByState.end();
+		++it) {
+		std::vector<int>& indices = it->second;
+		std::sort(indices.begin(), indices.end());
+		indices.erase(std::unique(indices.begin(), indices.end()), indices.end());
+		finalSegmentCount += indices.size();
+	}
+
+	if (finalSegmentCount == 0) {
+		outMessage = "No final Emory segments were found in the current selection.";
+		return false;
+	}
+
+	if (!SelectGeneratedSegmentsByStateMap(states, selectedFinalIndicesByState)) {
+		outMessage = "Found final Emory segments, but couldn't select the generated pieces.";
+		return false;
+	}
+
+	std::ostringstream message;
+	message << "Isolated " << finalSegmentCount << " final segment";
+	if (finalSegmentCount != 1) {
+		message << "s";
+	}
+	if (consideredGeneratedPieces > finalSegmentCount) {
+		message << " from the mixed selection";
+	}
+	message << ".";
+	outMessage = message.str();
 	return true;
 }
 

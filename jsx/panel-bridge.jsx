@@ -4296,6 +4296,19 @@ function MDUX_cppGetSelectedEmorySegmentState() {
     }
 }
 
+function MDUX_cppSelectSelectedEmoryFinalSegments() {
+    try {
+        if (app.documents.length === 0) {
+            return JSON.stringify({ ok: false, message: "No document open." });
+        }
+        var payload = "action=select-emory-final-segments";
+        var result = app.sendScriptMessage("EmoryDuctwork", "EmoryDuctworkPanel", payload);
+        return result || JSON.stringify({ ok: false, message: "No response from C++ panel." });
+    } catch (e) {
+        return JSON.stringify({ ok: false, message: "C++ select Emory final segments error: " + e });
+    }
+}
+
 function MDUX_cppSetSelectedEmoryStartSegment() {
     try {
         if (app.documents.length === 0) {

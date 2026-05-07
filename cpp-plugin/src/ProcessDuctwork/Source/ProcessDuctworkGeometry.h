@@ -56,6 +56,7 @@ namespace DuctworkGeometry
 	bool PurgeSelectedEmoryState(std::string& outMessage);
 	bool SetSelectedEmoryTaperAlignment(const std::string& alignment, std::string& outMessage);
 	bool SetSelectedEmoryCenterlineVisibility(bool hidden, std::string& outMessage);
+	bool SelectSelectedEmoryFinalSegments(std::string& outMessage);
 	bool SetSelectedEmoryStartSegment(std::string& outMessage);
 	bool ClearSelectedEmoryStartSegment(std::string& outMessage);
 	bool ApplySelectedEmorySegmentWidth(double newWidth, std::string& outMessage);

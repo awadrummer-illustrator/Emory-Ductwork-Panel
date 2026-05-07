@@ -1170,6 +1170,16 @@ ASErr ProcessDuctworkPlugin::Message(char* caller, char* selector, void* message
 					return kNoErr;
 				}
 
+				if (action == "select-emory-final-segments") {
+					std::string messageText;
+					const bool ok = DuctworkGeometry::SelectSelectedEmoryFinalSegments(messageText);
+					std::ostringstream out;
+					out << "{\"ok\":" << (ok ? "true" : "false")
+						<< ",\"message\":\"" << messageText << "\"}";
+					msg->outParam = ai::UnicodeString::FromUTF8(out.str());
+					return kNoErr;
+				}
+
 				if (action == "revert-emory-to-centerlines") {
 					std::string messageText;
 					const bool ok = DuctworkGeometry::RevertSelectedEmoryToCenterlines(messageText);

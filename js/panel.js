@@ -71,6 +71,7 @@
     let toggleConnectorStyleBtn = document.getElementById('toggle-connector-style-btn');
     let markOverlapSeparateBtn = document.getElementById('mark-overlap-separate-btn');
     let setEmoryStartBtn = document.getElementById('set-emory-start-btn');
+    let isolateEmoryFinalSegmentsBtn = document.getElementById('isolate-emory-final-segments-btn');
     let emoryWidthSlider = document.getElementById('emory-width-slider');
     let emoryWidthInput = document.getElementById('emory-width-input');
     let emorySelectionStatus = document.getElementById('emory-selection-status');
@@ -101,6 +102,7 @@
         toggleConnectorStyleBtn = document.getElementById('toggle-connector-style-btn');
         markOverlapSeparateBtn = document.getElementById('mark-overlap-separate-btn');
         setEmoryStartBtn = document.getElementById('set-emory-start-btn');
+        isolateEmoryFinalSegmentsBtn = document.getElementById('isolate-emory-final-segments-btn');
         emoryWidthSlider = document.getElementById('emory-width-slider');
         emoryWidthInput = document.getElementById('emory-width-input');
         emorySelectionStatus = document.getElementById('emory-selection-status');
@@ -1429,6 +1431,27 @@
         }
     }
 
+    async function handleIsolateEmoryFinalSegmentsClick() {
+        if (!isolateEmoryFinalSegmentsBtn) return;
+        isolateEmoryFinalSegmentsBtn.disabled = true;
+        setEmoryWidthStatus('Filtering selection to final segments...', false);
+        try {
+            await ensureBridgeLoaded();
+            const result = parseBridgeJsonResult(await evalScript('MDUX_cppSelectSelectedEmoryFinalSegments()'));
+            if (result && result.ok !== false) {
+                setEmoryWidthStatus(result.message || 'Final segments isolated.', false);
+                await refreshEmorySelectionState(true);
+            } else {
+                setEmoryWidthStatus((result && result.message) ? result.message : 'No final segments found in the selection.', true);
+            }
+        } catch (e) {
+            setEmoryWidthStatus('Unable to isolate final segments: ' + e.message, true);
+        } finally {
+            isolateEmoryFinalSegmentsBtn.disabled = false;
+            scheduleSkipOrthoRefresh();
+        }
+    }
+
     async function rotateSelection(angle) {
         if (!isFinite(angle)) {
             setSelectionStatus('Rotation value must be numeric.', true);
@@ -2311,6 +2334,7 @@
         if (toggleConnectorStyleBtn) toggleConnectorStyleBtn.addEventListener('click', handleToggleConnectorStyleClick);
         if (markOverlapSeparateBtn) markOverlapSeparateBtn.addEventListener('click', handleMarkOverlapSeparateClick);
         if (setEmoryStartBtn) setEmoryStartBtn.addEventListener('click', handleSetEmoryStartClick);
+        if (isolateEmoryFinalSegmentsBtn) isolateEmoryFinalSegmentsBtn.addEventListener('click', handleIsolateEmoryFinalSegmentsClick);
         if (processEmoryBtn) processEmoryBtn.addEventListener('click', handleProcessEmoryClick);
         if (emoryWidthSlider && emoryWidthInput) {
             const beginEmoryWidthDrag = function () {
