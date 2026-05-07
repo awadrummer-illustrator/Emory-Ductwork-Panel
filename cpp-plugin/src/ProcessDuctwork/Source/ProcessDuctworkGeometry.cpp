@@ -1160,6 +1160,165 @@ namespace
 		}
 	}
 
+	int ClampStartSegmentIndex(int startIndex, size_t segmentCount)
+	{
+		if (segmentCount == 0) {
+			return 0;
+		}
+		if (startIndex < 0) {
+			startIndex = 0;
+		}
+		if (startIndex >= static_cast<int>(segmentCount)) {
+			startIndex = static_cast<int>(segmentCount - 1);
+		}
+		return startIndex;
+	}
+
+	bool IsBlueOrOrangeRunLayer(const std::string& layerName)
+	{
+		return layerName == "Blue Ductwork" || layerName == "Orange Ductwork";
+	}
+
+	bool IsGreenOrLightOrangeRunLayer(const std::string& layerName)
+	{
+		return layerName == "Green Ductwork" ||
+			layerName == "Light Green Ductwork" ||
+			layerName == "Light Orange Ductwork";
+	}
+
+	void GetPairedUnitRunLayers(const std::string& layerName, std::vector<std::string>& outLayers)
+	{
+		outLayers.clear();
+		if (layerName == "Blue Ductwork") {
+			outLayers.push_back("Green Ductwork");
+			outLayers.push_back("Light Green Ductwork");
+			return;
+		}
+		if (layerName == "Orange Ductwork") {
+			outLayers.push_back("Light Orange Ductwork");
+			return;
+		}
+		if (layerName == "Green Ductwork" || layerName == "Light Green Ductwork") {
+			outLayers.push_back("Blue Ductwork");
+			return;
+		}
+		if (layerName == "Light Orange Ductwork") {
+			outLayers.push_back("Orange Ductwork");
+		}
+	}
+
+	bool EndpointNearAnyLayerEndpoint(const DuctworkPoint& point,
+		const std::vector<std::string>& layerNames,
+		AIArtHandle excludeArt,
+		double tolerance)
+	{
+		if (layerNames.empty()) {
+			return false;
+		}
+
+		std::vector<AIArtHandle> allPaths;
+		CollectAllLineLayerPaths(allPaths);
+		const double toleranceSq = tolerance * tolerance;
+		for (size_t i = 0; i < allPaths.size(); ++i) {
+			AIArtHandle art = allPaths[i];
+			if (!art || art == excludeArt || IsGeneratedEmoryArtInternal(art) || IsBackupCenterlineArt(art)) {
+				continue;
+			}
+
+			DuctworkPath path;
+			if (!BuildProcessPathForArt(art, path) ||
+				!DuctworkGeometry::IsCenterlineCandidate(path.art, path.points, path.closed, path.layerName)) {
+				continue;
+			}
+
+			bool layerMatches = false;
+			for (size_t layerIndex = 0; layerIndex < layerNames.size(); ++layerIndex) {
+				if (path.layerName == layerNames[layerIndex]) {
+					layerMatches = true;
+					break;
+				}
+			}
+			if (!layerMatches) {
+				continue;
+			}
+
+			std::vector<DuctworkPoint> candidatePoints;
+			SanitizePolyline(path.points, candidatePoints);
+			if (candidatePoints.size() < 2) {
+				continue;
+			}
+
+			const double startDx = point.x - candidatePoints.front().x;
+			const double startDy = point.y - candidatePoints.front().y;
+			if ((startDx * startDx + startDy * startDy) <= toleranceSq) {
+				return true;
+			}
+
+			const double endDx = point.x - candidatePoints.back().x;
+			const double endDy = point.y - candidatePoints.back().y;
+			if ((endDx * endDx + endDy * endDy) <= toleranceSq) {
+				return true;
+			}
+		}
+		return false;
+	}
+
+	int ResolveDefaultStartSegmentIndex(AIArtHandle sourceArt, size_t segmentCount)
+	{
+		if (!sourceArt || segmentCount == 0) {
+			return 0;
+		}
+
+		DuctworkPath path;
+		if (!BuildProcessPathForArt(sourceArt, path) || path.closed || path.points.size() < 2) {
+			return 0;
+		}
+
+		std::vector<DuctworkPoint> points;
+		SanitizePolyline(path.points, points);
+		if (points.size() < 2) {
+			return 0;
+		}
+
+		const int lastSegmentIndex = ClampStartSegmentIndex(static_cast<int>(segmentCount - 1), segmentCount);
+		const DuctworkPoint& startPoint = points.front();
+		const DuctworkPoint& endPoint = points.back();
+		std::vector<std::string> pairedLayers;
+		GetPairedUnitRunLayers(path.layerName, pairedLayers);
+		const bool startNearPairedRun = EndpointNearAnyLayerEndpoint(startPoint, pairedLayers, sourceArt, 10.0);
+		const bool endNearPairedRun = EndpointNearAnyLayerEndpoint(endPoint, pairedLayers, sourceArt, 10.0);
+
+		if (IsBlueOrOrangeRunLayer(path.layerName)) {
+			if (startNearPairedRun != endNearPairedRun) {
+				return startNearPairedRun ? 0 : lastSegmentIndex;
+			}
+
+			std::vector<DuctworkPoint> unitAttachmentPoints;
+			CollectUnitAttachmentPoints(unitAttachmentPoints);
+			const bool startNearUnit = IsPointNearAny(startPoint, unitAttachmentPoints, 10.0);
+			const bool endNearUnit = IsPointNearAny(endPoint, unitAttachmentPoints, 10.0);
+			if (startNearUnit != endNearUnit) {
+				return startNearUnit ? 0 : lastSegmentIndex;
+			}
+		}
+
+		if (IsGreenOrLightOrangeRunLayer(path.layerName)) {
+			if (startNearPairedRun != endNearPairedRun) {
+				return startNearPairedRun ? lastSegmentIndex : 0;
+			}
+
+			std::vector<DuctworkPoint> unitAttachmentPoints;
+			CollectUnitAttachmentPoints(unitAttachmentPoints);
+			const bool startNearUnit = IsPointNearAny(startPoint, unitAttachmentPoints, 10.0);
+			const bool endNearUnit = IsPointNearAny(endPoint, unitAttachmentPoints, 10.0);
+			if (startNearUnit != endNearUnit) {
+				return startNearUnit ? lastSegmentIndex : 0;
+			}
+		}
+
+		return 0;
+	}
+
 	bool CollectBackupCenterlinesForSourceId(const std::string& sourceId, std::vector<AIArtHandle>& outArt)
 	{
 		outArt.clear();
@@ -4269,17 +4428,10 @@ namespace
 
 		double startValue = 0.0;
 		if (!DuctworkMetadata::GetDouble(sourceArt, kEmoryStartSegmentIndexKey, startValue)) {
-			return 0;
+			return ResolveDefaultStartSegmentIndex(sourceArt, segmentCount);
 		}
 
-		int startIndex = static_cast<int>(startValue);
-		if (startIndex < 0) {
-			startIndex = 0;
-		}
-		if (startIndex >= static_cast<int>(segmentCount)) {
-			startIndex = static_cast<int>(segmentCount - 1);
-		}
-		return startIndex;
+		return ClampStartSegmentIndex(static_cast<int>(startValue), segmentCount);
 	}
 
 	bool HasExplicitStartSegmentIndex(AIArtHandle sourceArt)
@@ -8145,12 +8297,14 @@ bool BuildRoundCornerPolygon(const ConnectorSpec& connector, const CornerPairing
 		}
 
 		const size_t segmentCount = points.size() - 1;
+		const int startSegmentIndex = ReadStartSegmentIndex(path.art, segmentCount);
+		const bool hasExplicitStartSegmentIndex = HasExplicitStartSegmentIndex(path.art);
 		std::vector<double> segmentWidths;
 		ReadSegmentWidths(path.art, segmentCount, bodyWidth, segmentWidths);
 		NormalizeGuideLikeStoredWidths(path.art,
 			sourceId,
 			points,
-			ReadStartSegmentIndex(path.art, segmentCount),
+			startSegmentIndex,
 			bodyWidth,
 			segmentWidths);
 		bool omitStartSegmentThickness = ReadFinalSegmentThicknessFlag(path.art, kEmoryOmitStartSegmentThicknessKey);
@@ -8174,6 +8328,8 @@ bool BuildRoundCornerPolygon(const ConnectorSpec& connector, const CornerPairing
 			logStream << "Emory path sourceId=" << sourceId
 				<< " layer=" << path.layerName
 				<< " segments=" << segmentCount
+				<< " startSegment=" << startSegmentIndex
+				<< " explicitStart=" << (hasExplicitStartSegmentIndex ? 1 : 0)
 				<< " bodyWidth=" << bodyWidth
 				<< " strokeWidth=" << sourceStrokeWidth
 				<< " omitStart=" << (omitStartSegmentThickness ? 1 : 0)
@@ -8186,7 +8342,6 @@ bool BuildRoundCornerPolygon(const ConnectorSpec& connector, const CornerPairing
 			DuctworkLog::Write(logStream.str());
 		}
 		if (!HasStoredSegmentWidths(path.art, segmentCount)) {
-			const int startSegmentIndex = ReadStartSegmentIndex(path.art, segmentCount);
 			ApplyDefaultStraightChainTapers(path.art, points, startSegmentIndex, segmentWidths);
 			WriteSegmentWidths(path.art, segmentWidths);
 		}
@@ -11471,7 +11626,7 @@ bool DuctworkGeometry::ClearSelectedEmoryStartSegment(std::string& outMessage)
 	std::vector<double> widths;
 	ReadSegmentWidths(canonicalArt, segmentCount, defaultWidth, widths);
 	std::vector<double> retaperedWidths = widths;
-	const int defaultStartSegmentIndex = 0;
+	const int defaultStartSegmentIndex = ResolveDefaultStartSegmentIndex(canonicalArt, segmentCount);
 	ApplyDefaultStraightChainTapers(canonicalArt, canonicalPoints, defaultStartSegmentIndex, retaperedWidths);
 	const bool widthsChanged = (retaperedWidths != widths);
 	if (widthsChanged) {

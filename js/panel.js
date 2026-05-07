@@ -673,8 +673,6 @@
 
     function getEmoryWidthSliderConfig(width) {
         const normalized = Math.max(0.25, Number(width) || 0.25);
-        const lowerSpan = Math.max(6, normalized * 0.75);
-        const upperSpan = Math.max(8, normalized * 1.25);
         let step = 0.1;
         if (normalized >= 40) {
             step = 0.25;
@@ -683,8 +681,8 @@
             step = 0.5;
         }
         return {
-            min: Math.max(0.25, normalized - lowerSpan),
-            max: normalized + upperSpan,
+            min: 0.25,
+            max: Math.max(240, normalized * 4, normalized + 80),
             step: step
         };
     }
@@ -715,6 +713,10 @@
     function finishEmoryWidthDrag(commitFinalWidth) {
         if (!emoryWidthDragActive) return;
         emoryWidthDragActive = false;
+        if (emoryWidthApplyTimer) {
+            clearTimeout(emoryWidthApplyTimer);
+            emoryWidthApplyTimer = null;
+        }
 
         const numericWidth = emoryWidthSlider ? Number(emoryWidthSlider.value) : NaN;
         if (commitFinalWidth && isFinite(numericWidth) && numericWidth > 0) {
@@ -1904,6 +1906,8 @@
     let teDragActive = false;
     let teTransformAppliedInDrag = false;
     let teNextPayload = null; // {scale, rotate, undoPrevious}
+    let tePendingSliderSource = null;
+    let teSliderCommitInFlight = false;
 
     // Track start values for the current drag session
     let teDragStartScale = 100;
@@ -1986,19 +1990,28 @@
     let transformDebounceTimer = null;
     const TRANSFORM_DEBOUNCE_MS = 0;
 
-    function handleLiveTransform(source) {
+    function handleLiveTransform(source, commitNow) {
         // Check if Live is enabled
-        if (teLiveOption && !teLiveOption.checked) return;
+        if (teLiveOption && !teLiveOption.checked) {
+            teSliderCommitInFlight = false;
+            return;
+        }
 
         // Ensure elements are found
-        if (!teScaleSlider || !teRotateSlider) return;
+        if (!teScaleSlider || !teRotateSlider) {
+            teSliderCommitInFlight = false;
+            return;
+        }
 
         const currentScale = parseFloat(teScaleSlider.value);
         const currentRotate = parseFloat(teRotateSlider.value);
         const useScale = (source === 'rotate' && !teScaleDirty && lastSelectionScale !== null) ? lastSelectionScale : currentScale;
         const useRotate = (source === 'scale' && !teRotateDirty && lastSelectionRotation !== null) ? lastSelectionRotation : currentRotate;
 
-        if (isNaN(useScale) || isNaN(useRotate)) return;
+        if (isNaN(useScale) || isNaN(useRotate)) {
+            teSliderCommitInFlight = false;
+            return;
+        }
         console.log('[TRANSFORM] live', source, 'cur', currentScale, currentRotate, 'use', useScale, useRotate, 'dirty', teScaleDirty, teRotateDirty, 'last', lastSelectionScale, lastSelectionRotation);
 
         // Send ABSOLUTE values - the slider value IS the target scale/rotation
@@ -2012,9 +2025,16 @@
             undoPrevious: false   // Not needed with absolute values + debounce
         };
 
+        if (teDragActive && !commitNow) {
+            tePendingSliderSource = source;
+            return;
+        }
+
         if (TRANSFORM_DEBOUNCE_MS <= 0) {
             processTransformQueue().finally(() => {
                 teDragActive = false;
+                tePendingSliderSource = null;
+                teSliderCommitInFlight = false;
             });
             return;
         }
@@ -2030,7 +2050,25 @@
             await new Promise(r => setTimeout(r, 100));
             // NOW safe to allow polling again - transform is complete
             teDragActive = false;
+            tePendingSliderSource = null;
+            teSliderCommitInFlight = false;
         }, TRANSFORM_DEBOUNCE_MS);
+    }
+
+    function commitPendingTransform(source) {
+        if (teSliderCommitInFlight) return;
+        const commitSource = source || tePendingSliderSource || 'scale';
+        if (!teScaleDirty && !teRotateDirty) {
+            teDragActive = false;
+            tePendingSliderSource = null;
+            return;
+        }
+        if (transformDebounceTimer) {
+            clearTimeout(transformDebounceTimer);
+            transformDebounceTimer = null;
+        }
+        teSliderCommitInFlight = true;
+        handleLiveTransform(commitSource, true);
     }
 
     function resetTransformControls(resetValues = true) {
@@ -2044,6 +2082,8 @@
         teDragActive = false;
         teTransformAppliedInDrag = false;
         teNextPayload = null;
+        tePendingSliderSource = null;
+        teSliderCommitInFlight = false;
         teDragStartScale = 100;
         teDragStartRotate = 0;
         teScaleDirty = false;
@@ -2211,7 +2251,7 @@
     }
 
     // Helper to handle drag start/end globally
-    async function handleDragStart() {
+    async function handleDragStart(source) {
         // Load current state from metadata BEFORE setting teDragActive
         // (refreshSelectionTransformState skips if teDragActive is true)
         await refreshSelectionTransformState();
@@ -2219,6 +2259,7 @@
         // Now set drag active
         teDragActive = true;
         teTransformAppliedInDrag = false;
+        tePendingSliderSource = source || null;
 
         // Capture start values from both sliders (now updated from metadata)
         teDragStartScale = parseFloat(teScaleSlider.value) || 100;
@@ -2229,6 +2270,10 @@
     }
 
     function handleDragEnd() {
+        if (tePendingSliderSource) {
+            commitPendingTransform(tePendingSliderSource);
+            return;
+        }
         // DON'T set teDragActive = false here if there's a pending debounce timer
         // The debounce callback will set it after the transform completes
         // This prevents polling from overwriting the slider value before the transform fires
@@ -2282,10 +2327,10 @@
                 beginEmoryWidthDrag();
             }, { passive: true });
             window.addEventListener('mouseup', function () {
-                finishEmoryWidthDrag(false);
+                finishEmoryWidthDrag(true);
             });
             window.addEventListener('touchend', function () {
-                finishEmoryWidthDrag(false);
+                finishEmoryWidthDrag(true);
             }, { passive: true });
             window.addEventListener('touchcancel', function () {
                 finishEmoryWidthDrag(false);
@@ -2295,7 +2340,7 @@
                 if (!isFinite(numericWidth) || numericWidth <= 0) return;
                 beginEmoryWidthDrag();
                 emoryWidthInput.value = emoryWidthSlider.value;
-                queueEmoryWidthApply(numericWidth, false);
+                setEmoryWidthStatus('Release to apply width.', false);
             });
             emoryWidthSlider.addEventListener('change', function () {
                 const numericWidth = Number(emoryWidthSlider.value);
@@ -2682,28 +2727,27 @@
         }
 
         if (teScaleSlider && teScaleInput) {
-            teScaleSlider.addEventListener('mousedown', handleDragStart);
-        // Backup: change event fires on commit (release)
-        // teScaleSlider.addEventListener('change', () => resetTransformControls(true)); // REMOVED
+            teScaleSlider.addEventListener('mousedown', () => handleDragStart('scale'));
+            teScaleSlider.addEventListener('change', () => commitPendingTransform('scale'));
 
-        teScaleSlider.addEventListener('input', (e) => {
-            const rawValue = parseFloat(teScaleSlider.value);
-            let newValue = rawValue;
-            const sliderMax = parseFloat(teScaleSlider.max);
-            const sliderMin = parseFloat(teScaleSlider.min);
-            if (teDragActive) {
-                const delta = rawValue - teDragStartScale;
-                const speed = e.shiftKey ? 1.0 : 0.25;
-                newValue = teDragStartScale + (delta * speed);
-                // Clamp to slider range
-                newValue = Math.max(sliderMin, Math.min(sliderMax, newValue));
-            }
-            teScaleInput.value = Math.round(newValue);
-            lastSelectionScale = newValue;
-            teScaleDirty = true;
-            console.log('[TRANSFORM] scale input', rawValue, '->', newValue);
-            handleLiveTransform('scale');
-        });
+            teScaleSlider.addEventListener('input', (e) => {
+                const rawValue = parseFloat(teScaleSlider.value);
+                let newValue = rawValue;
+                const sliderMax = parseFloat(teScaleSlider.max);
+                const sliderMin = parseFloat(teScaleSlider.min);
+                if (teDragActive) {
+                    const delta = rawValue - teDragStartScale;
+                    const speed = e.shiftKey ? 1.0 : 0.25;
+                    newValue = teDragStartScale + (delta * speed);
+                    // Clamp to slider range
+                    newValue = Math.max(sliderMin, Math.min(sliderMax, newValue));
+                }
+                teScaleInput.value = Math.round(newValue);
+                lastSelectionScale = newValue;
+                teScaleDirty = true;
+                console.log('[TRANSFORM] scale input', rawValue, '->', newValue);
+                handleLiveTransform('scale', false);
+            });
 
         // Track if Enter was just pressed to skip change event
         let scaleEnterPressed = false;
@@ -2726,7 +2770,7 @@
             teDragActive = true;
             teTransformAppliedInDrag = false;
             teScaleDirty = true;
-            handleLiveTransform('scale');
+            handleLiveTransform('scale', true);
 
             teDragActive = false;
             teTransformAppliedInDrag = false;
@@ -2774,8 +2818,8 @@
         });
     }
     if (teRotateSlider && teRotateInput) {
-        teRotateSlider.addEventListener('mousedown', handleDragStart);
-        // teRotateSlider.addEventListener('change', () => resetTransformControls(true)); // REMOVED
+        teRotateSlider.addEventListener('mousedown', () => handleDragStart('rotate'));
+        teRotateSlider.addEventListener('change', () => commitPendingTransform('rotate'));
 
         teRotateSlider.addEventListener('input', (e) => {
             const rawValue = parseFloat(teRotateSlider.value);
@@ -2793,7 +2837,7 @@
             lastSelectionRotation = newValue;
             teRotateDirty = true;
             console.log('[TRANSFORM] rotate input', rawValue, '->', newValue);
-            handleLiveTransform('rotate');
+            handleLiveTransform('rotate', false);
         });
 
         // Track if Enter was just pressed to skip change event

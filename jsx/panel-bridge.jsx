@@ -4245,19 +4245,11 @@ function MDUX_cppProcessPlacedApi(payloadOverride) {
             return JSON.stringify({ ok: false, message: "No document open." });
         }
 
-        // Before C++ processing, snapshot selected target-layer anchors that need art placement
-        var targetLayerAnchors = MDUX_collectSelectedTargetAnchors();
-
         var payload = "action=process-placed-api";
         if (payloadOverride && typeof payloadOverride === "string") {
             payload = payloadOverride;
         }
         var result = app.sendScriptMessage("EmoryDuctwork", "EmoryDuctworkPanel", payload);
-
-        // Post-processing: place art at any selected target-layer anchors that still lack art
-        if (targetLayerAnchors && targetLayerAnchors.length > 0) {
-            MDUX_placeArtAtTargetAnchors(targetLayerAnchors);
-        }
 
         return result || JSON.stringify({ ok: false, message: "No response from C++ panel." });
     } catch (e) {
