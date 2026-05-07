@@ -605,151 +605,6 @@ namespace
 		}
 	}
 
-	bool GetStrokeWidth(AIArtHandle path, double& outWidth)
-	{
-		outWidth = 0.0;
-		if (!path || !sAIPathStyle) {
-			return false;
-		}
-		AIPathStyle style;
-		AIBoolean fillVisible = false;
-		AIBoolean strokeVisible = false;
-		if (sAIPathStyle->GetPathStyleEx(path, &style, &fillVisible, &strokeVisible)) {
-			return false;
-		}
-		if (!strokeVisible || !style.strokePaint) {
-			return false;
-		}
-		outWidth = static_cast<double>(style.stroke.width);
-		return true;
-	}
-
-	bool ScaleStrokeWidth(AIArtHandle path, double scaleFactor)
-	{
-		if (!path || !sAIPathStyle) {
-			return false;
-		}
-		AIPathStyle style;
-		AIBoolean fillVisible = false;
-		AIBoolean strokeVisible = false;
-		if (sAIPathStyle->GetPathStyleEx(path, &style, &fillVisible, &strokeVisible)) {
-			return false;
-		}
-		if (!strokeVisible || !style.strokePaint) {
-			return false;
-		}
-		style.stroke.width = static_cast<AIReal>(style.stroke.width * scaleFactor);
-		if (style.stroke.width < 0.01f) {
-			style.stroke.width = 0.01f;
-		}
-		return sAIPathStyle->SetPathStyleEx(path, &style, fillVisible, strokeVisible) == kNoErr;
-	}
-
-	bool ScaleLineStrokeWidths(AIArtHandle path, double scaleFactor)
-	{
-		if (!path) {
-			return false;
-		}
-		if (sAIArtStyle && sAIArtStyleParser) {
-			AIArtStyleHandle artStyle = nullptr;
-			if (sAIArtStyle->GetArtStyle(path, &artStyle) == kNoErr && artStyle) {
-				AIStyleParser parser = nullptr;
-				if (sAIArtStyleParser->NewParser(&parser) == kNoErr && parser) {
-					bool modified = false;
-					if (sAIArtStyleParser->ParseStyle(parser, artStyle) == kNoErr) {
-						const ai::int32 count = sAIArtStyleParser->CountPaintFields(parser);
-						for (ai::int32 i = 0; i < count; ++i) {
-							AIParserPaintField field = nullptr;
-							if (sAIArtStyleParser->GetNthPaintField(parser, i, &field) != kNoErr || !field) {
-								continue;
-							}
-							if (!sAIArtStyleParser->IsStroke(field)) {
-								continue;
-							}
-							AIStrokeStyle stroke;
-							stroke.Init();
-							AIArtStylePaintData paintData;
-							paintData.InitToUnknown();
-							if (sAIArtStyleParser->GetStroke(field, &stroke, &paintData) != kNoErr) {
-								continue;
-							}
-							stroke.width = static_cast<AIReal>(stroke.width * scaleFactor);
-							if (stroke.width < 0.01f) {
-								stroke.width = 0.01f;
-							}
-							if (sAIArtStyleParser->SetStroke(field, &stroke, &paintData) == kNoErr) {
-								modified = true;
-							}
-						}
-					}
-					if (modified) {
-						AIArtStyleHandle newStyle = nullptr;
-						if (sAIArtStyleParser->CreateNewStyle(parser, &newStyle) == kNoErr && newStyle) {
-							sAIArtStyle->SetArtStyle(path, newStyle);
-							sAIArtStyleParser->DisposeParser(parser);
-							return true;
-						}
-					}
-					sAIArtStyleParser->DisposeParser(parser);
-				}
-			}
-		}
-		return ScaleStrokeWidth(path, scaleFactor);
-	}
-
-	bool GetMaxStrokeWidth(AIArtHandle path, double& outWidth)
-	{
-		outWidth = 0.0;
-		if (!path) {
-			return false;
-		}
-		if (sAIArtStyle && sAIArtStyleParser) {
-			AIArtStyleHandle artStyle = nullptr;
-			if (sAIArtStyle->GetArtStyle(path, &artStyle) == kNoErr && artStyle) {
-				AIStyleParser parser = nullptr;
-				if (sAIArtStyleParser->NewParser(&parser) == kNoErr && parser) {
-					double maxWidth = 0.0;
-					if (sAIArtStyleParser->ParseStyle(parser, artStyle) == kNoErr) {
-						const ai::int32 count = sAIArtStyleParser->CountPaintFields(parser);
-						for (ai::int32 i = 0; i < count; ++i) {
-							AIParserPaintField field = nullptr;
-							if (sAIArtStyleParser->GetNthPaintField(parser, i, &field) != kNoErr || !field) {
-								continue;
-							}
-							if (!sAIArtStyleParser->IsStroke(field)) {
-								continue;
-							}
-							AIStrokeStyle stroke;
-							stroke.Init();
-							AIArtStylePaintData paintData;
-							paintData.InitToUnknown();
-							if (sAIArtStyleParser->GetStroke(field, &stroke, &paintData) == kNoErr) {
-								if (stroke.width > maxWidth) {
-									maxWidth = static_cast<double>(stroke.width);
-								}
-							}
-						}
-					}
-					sAIArtStyleParser->DisposeParser(parser);
-					if (maxWidth > 0.0) {
-						outWidth = maxWidth;
-						return true;
-					}
-				}
-			}
-		}
-		return GetStrokeWidth(path, outWidth);
-	}
-
-	double GetBaselineMaxStrokeWidth(AIArtHandle art)
-	{
-		const std::string layerName = DuctworkGeometry::GetArtLayerName(art);
-		if (layerName == "Thermostat Lines") {
-			return 4.0;
-		}
-		return 8.0;
-	}
-
 	void EnsureOriginalTransform(AIArtHandle art, double currentScale, double currentRotation)
 	{
 		double originalScale = 0.0;
@@ -1417,6 +1272,7 @@ void EmoryDuctworkPanel::ApplyTransformFromUI()
 bool EmoryDuctworkPanel::ApplyTransformSelection(double targetScale, double targetRotation, bool allowCache, bool updateUI, bool livePreview, std::string* outMessage)
 {
 	AppContext appContext(fPluginRef);
+	(void)livePreview;
 	std::vector<AIArtHandle> selection;
 	if (!GetSelectionForAction(selection, allowCache)) {
 		DuctworkLog::Write("Panel ApplyTransform: no selection");
@@ -1487,65 +1343,8 @@ bool EmoryDuctworkPanel::ApplyTransformSelection(double targetScale, double targ
 	size_t emoryStrokeScaled = 0;
 	size_t partTransformed = 0;
 
-	if (applyScale && !emoryLinePaths.empty()) {
-		double baselineStroke = 0.0;
-		bool needsEmoryStrokeApply = false;
-		for (size_t i = 0; i < emoryLinePaths.size(); ++i) {
-			const double candidateBaseline = GetBaselineMaxStrokeWidth(emoryLinePaths[i]);
-			if (candidateBaseline > baselineStroke) {
-				baselineStroke = candidateBaseline;
-			}
-		}
-		if (baselineStroke <= 0.0) {
-			baselineStroke = 8.0;
-		}
-		double targetStrokeWidth = baselineStroke * (targetScale / 100.0);
-		if (!std::isfinite(targetStrokeWidth) || targetStrokeWidth < 0.25) {
-			targetStrokeWidth = 0.25;
-		}
-		for (size_t i = 0; i < emoryLinePaths.size(); ++i) {
-			double currentStroke = 0.0;
-			if (!GetMaxStrokeWidth(emoryLinePaths[i], currentStroke) ||
-				std::fabs(currentStroke - targetStrokeWidth) >= 0.0001) {
-				needsEmoryStrokeApply = true;
-				break;
-			}
-		}
-		if (needsEmoryStrokeApply) {
-			std::string strokeMessage;
-			if (DuctworkGeometry::ApplySelectedEmoryStrokeWidth(targetStrokeWidth, strokeMessage, false)) {
-				emoryStrokeScaled = emoryLinePaths.size();
-				for (size_t i = 0; i < emoryLinePaths.size(); ++i) {
-					DuctworkMetadata::SetDouble(emoryLinePaths[i], "MDUX_OriginalStrokeWidth", baselineStroke);
-					DuctworkMetadata::SetDouble(emoryLinePaths[i], "MDUX_CurrentScale", targetScale);
-				}
-				DuctworkLog::Write("Panel ApplyTransform: emoryStrokeWidth=" + std::to_string(targetStrokeWidth) +
-					" selectedGenerated=" + std::to_string(static_cast<int>(emoryLinePaths.size())) +
-					" message=" + strokeMessage);
-			}
-		}
-	}
-
-	for (size_t i = 0; i < linePaths.size(); ++i) {
-		AIArtHandle art = linePaths[i];
-		double currentScale = 100.0;
-		const double baselineStroke = GetBaselineMaxStrokeWidth(art);
-		double currentStroke = 0.0;
-		if (GetMaxStrokeWidth(art, currentStroke) && currentStroke > 0.0 && baselineStroke > 0.0) {
-			currentScale = (currentStroke / baselineStroke) * 100.0;
-			DuctworkMetadata::SetDouble(art, "MDUX_OriginalStrokeWidth", baselineStroke);
-		}
-		if (!applyScale) {
-			continue;
-		}
-		const double scaleFactor = (currentScale == 0.0) ? 1.0 : (targetScale / currentScale);
-		if (std::fabs(scaleFactor - 1.0) < 0.0001) {
-			continue;
-		}
-		if (ScaleLineStrokeWidths(art, scaleFactor)) {
-			++lineScaled;
-			DuctworkMetadata::SetDouble(art, "MDUX_CurrentScale", targetScale);
-		}
+	if (applyScale && (!linePaths.empty() || !emoryLinePaths.empty())) {
+		DuctworkLog::Write("Panel ApplyTransform: skipped ductwork line stroke scaling; use stroke width control");
 	}
 
 	for (size_t i = 0; i < partItems.size(); ++i) {
@@ -1673,37 +1472,11 @@ void EmoryDuctworkPanel::ResetTransformToOriginal()
 		SetStatusText(L"No selection.");
 		return;
 	}
-	std::vector<AIArtHandle> linePaths;
 	std::vector<AIArtHandle> partItems;
 	std::vector<AIArtHandle> rotatableParts;
 	for (size_t i = 0; i < selection.size(); ++i) {
-		CollectLinePathsRecursive(selection[i], linePaths);
 		CollectPartItemsRecursive(selection[i], partItems);
 		CollectRotatablePartItemsRecursive(selection[i], rotatableParts);
-	}
-
-	for (size_t i = 0; i < linePaths.size(); ++i) {
-		AIArtHandle art = linePaths[i];
-		double currentScale = DuctworkMetadata::ReadScaleOrDefault(art, 100.0);
-		const double originalScale = ReadOriginalScale(art, 100.0);
-		double currentStroke = 0.0;
-		const double baselineStroke = GetBaselineMaxStrokeWidth(art);
-		if (baselineStroke > 0.0 && GetMaxStrokeWidth(art, currentStroke) && currentStroke > 0.0) {
-			currentScale = (currentStroke / baselineStroke) * 100.0;
-			DuctworkMetadata::SetDouble(art, "MDUX_OriginalStrokeWidth", baselineStroke);
-		}
-		const double scaleFactor = (currentScale == 0.0) ? 1.0 : (originalScale / currentScale);
-		DuctworkLog::Write("Panel ResetOriginal: line scale originalScale=" + std::to_string(originalScale) +
-			" currentScale=" + std::to_string(currentScale) +
-			" scaleFactor=" + std::to_string(scaleFactor) +
-			" originalStroke=" + std::to_string(baselineStroke) +
-			" currentStroke=" + std::to_string(currentStroke));
-		if (std::fabs(scaleFactor - 1.0) < 0.0001) {
-			continue;
-		}
-		if (ScaleLineStrokeWidths(art, scaleFactor)) {
-			DuctworkMetadata::SetDouble(art, "MDUX_CurrentScale", originalScale);
-		}
 	}
 
 	for (size_t i = 0; i < partItems.size(); ++i) {
@@ -1772,35 +1545,9 @@ void EmoryDuctworkPanel::ResetScale()
 		SetStatusText(L"No selection.");
 		return;
 	}
-	std::vector<AIArtHandle> linePaths;
 	std::vector<AIArtHandle> partItems;
 	for (size_t i = 0; i < selection.size(); ++i) {
-		CollectLinePathsRecursive(selection[i], linePaths);
 		CollectPartItemsRecursive(selection[i], partItems);
-	}
-
-	for (size_t i = 0; i < linePaths.size(); ++i) {
-		AIArtHandle art = linePaths[i];
-		double currentScale = DuctworkMetadata::ReadScaleOrDefault(art, 100.0);
-		const double originalScale = ReadOriginalScale(art, 100.0);
-		double currentStroke = 0.0;
-		const double baselineStroke = GetBaselineMaxStrokeWidth(art);
-		if (baselineStroke > 0.0 && GetMaxStrokeWidth(art, currentStroke) && currentStroke > 0.0) {
-			currentScale = (currentStroke / baselineStroke) * 100.0;
-			DuctworkMetadata::SetDouble(art, "MDUX_OriginalStrokeWidth", baselineStroke);
-		}
-		const double scaleFactor = (currentScale == 0.0) ? 1.0 : (originalScale / currentScale);
-		DuctworkLog::Write("Panel ResetScale: line scale originalScale=" + std::to_string(originalScale) +
-			" currentScale=" + std::to_string(currentScale) +
-			" scaleFactor=" + std::to_string(scaleFactor) +
-			" originalStroke=" + std::to_string(baselineStroke) +
-			" currentStroke=" + std::to_string(currentStroke));
-		if (std::fabs(scaleFactor - 1.0) < 0.0001) {
-			continue;
-		}
-		if (ScaleLineStrokeWidths(art, scaleFactor)) {
-			DuctworkMetadata::SetDouble(art, "MDUX_CurrentScale", originalScale);
-		}
 	}
 
 	for (size_t i = 0; i < partItems.size(); ++i) {
