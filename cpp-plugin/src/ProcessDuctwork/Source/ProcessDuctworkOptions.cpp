@@ -74,7 +74,8 @@ ProcessDuctworkOptions::ProcessDuctworkOptions()
 	directPlaceGraphics(false),
 	placedApiGraphics(false),
 	hasRotationOverride(false),
-	rotationOverride(0.0)
+	rotationOverride(0.0),
+	branchTaperReductionPercent(25.0)
 {
 }
 
@@ -170,6 +171,12 @@ bool ProcessDuctworkOptions::ParseFromJson(const std::string& json)
 		if (ParseNumberAt(json, pos, value)) {
 			hasRotationOverride = true;
 			rotationOverride = value;
+		}
+	}
+	if (ExtractKey(json, "branchTaperReductionPercent", pos)) {
+		double value = 25.0;
+		if (ParseNumberAt(json, pos, value)) {
+			branchTaperReductionPercent = value;
 		}
 	}
 	return true;

@@ -36,6 +36,7 @@ namespace DuctworkGeometry
 	bool GetPathPoints(AIArtHandle path, std::vector<DuctworkPoint>& outPoints, bool& outClosed);
 	std::string GetArtLayerName(AIArtHandle art);
 	bool IsGeneratedEmoryBody(AIArtHandle art);
+	void SetEmoryBranchTaperReductionPercent(double reductionPercent);
 	bool IsCenterlineCandidate(AIArtHandle art, const std::vector<DuctworkPoint>& points, bool closed, const std::string& layerName);
 	bool GetEffectiveStrokeWidth(AIArtHandle art, double& outWidth);
 	bool EnsureEmorySourceId(AIArtHandle art, std::string& outId);

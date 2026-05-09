@@ -1425,6 +1425,56 @@ DuctworkPartStats DuctworkParts::CreateAnchorsAndGraphics(const std::vector<Duct
 	}
 
 	std::vector<DuctworkPath> partPaths(paths);
+	std::vector<DuctworkPath> networkPaths(partPaths);
+	std::vector<int> networkToPartIndex;
+	networkToPartIndex.reserve(networkPaths.size());
+	for (size_t pathIndex = 0; pathIndex < networkPaths.size(); ++pathIndex) {
+		networkToPartIndex.push_back(static_cast<int>(pathIndex));
+	}
+	{
+		const char* const ductLayerNames[] = {
+			"Blue Ductwork",
+			"Green Ductwork",
+			"Light Green Ductwork",
+			"Orange Ductwork",
+			"Light Orange Ductwork"
+		};
+		for (size_t layerIndex = 0; layerIndex < sizeof(ductLayerNames) / sizeof(ductLayerNames[0]); ++layerIndex) {
+			std::vector<DuctworkPath> documentPaths;
+			CollectDocumentPathsByLayer(ductLayerNames[layerIndex], documentPaths);
+			for (size_t documentPathIndex = 0; documentPathIndex < documentPaths.size(); ++documentPathIndex) {
+				bool alreadyPresent = false;
+				for (size_t existingIndex = 0; existingIndex < networkPaths.size(); ++existingIndex) {
+					if (networkPaths[existingIndex].art &&
+						networkPaths[existingIndex].art == documentPaths[documentPathIndex].art) {
+						alreadyPresent = true;
+						break;
+					}
+				}
+				if (alreadyPresent) {
+					continue;
+				}
+				networkPaths.push_back(documentPaths[documentPathIndex]);
+				networkToPartIndex.push_back(-1);
+			}
+		}
+	}
+	std::vector<DuctworkConnection> networkConnections = connections;
+	if (networkPaths.size() > partPaths.size()) {
+		networkConnections.clear();
+		DuctworkConnections::FindConnections(
+			networkPaths,
+			2.0,
+			3.0,
+			15.0,
+			10.0,
+			true,
+			networkConnections);
+		DuctworkLog::Write("Parts: document network context paths=" +
+			std::to_string(networkPaths.size()) +
+			" selectedPaths=" + std::to_string(partPaths.size()) +
+			" connections=" + std::to_string(networkConnections.size()));
+	}
 	std::map<std::string, std::vector<int> > grouped;
 	for (size_t i = 0; i < partPaths.size(); ++i) {
 		const DuctworkPath& path = partPaths[i];
@@ -1466,10 +1516,10 @@ DuctworkPartStats DuctworkParts::CreateAnchorsAndGraphics(const std::vector<Duct
 		const double interiorConnectionClearance = 10.0;
 
 		AILayerHandle ignoredLayer = GetOrCreateLayer("Ignored");
-		if (!ignoredLayer) {
-			ignoredLayer = GetOrCreateLayer("Ignore");
-		}
 		const bool canPersistIgnoreAnchors = ignoredLayer && DuctworkArt::IsLayerChainEditableVisible(ignoredLayer);
+		if (!canPersistIgnoreAnchors) {
+			DuctworkLog::Write("Parts: ignore anchors will be runtime-only; Ignored layer not editable/visible");
+		}
 
 		auto hasInternalAnchorNearEndpoint = [&](const DuctworkPath& path, size_t endpointIndex) -> bool {
 			if (path.points.size() < 3 || endpointIndex >= path.points.size()) {
@@ -1583,6 +1633,96 @@ DuctworkPartStats DuctworkParts::CreateAnchorsAndGraphics(const std::vector<Duct
 		if (unitBranchIgnoreCount > 0) {
 			DuctworkLog::Write("Parts: unit-branch ignore total=" + std::to_string(unitBranchIgnoreCount));
 		}
+
+		size_t unitBranchTrunkEndpointIgnoreCount = 0;
+		for (size_t connectionIndex = 0; connectionIndex < networkConnections.size(); ++connectionIndex) {
+			const DuctworkConnection& conn = networkConnections[connectionIndex];
+			if (conn.type != kConnectionEndpointToSegment) {
+				continue;
+			}
+
+			int branchIndex = -1;
+			int trunkIndex = -1;
+			int branchEndpointIndex = -1;
+			if (conn.endpointA >= 0 && conn.segB >= 0) {
+				branchIndex = conn.a;
+				trunkIndex = conn.b;
+				branchEndpointIndex = conn.endpointA;
+			} else if (conn.endpointB >= 0 && conn.segA >= 0) {
+				branchIndex = conn.b;
+				trunkIndex = conn.a;
+				branchEndpointIndex = conn.endpointB;
+			}
+
+			if (branchIndex < 0 || trunkIndex < 0 ||
+				branchIndex >= static_cast<int>(networkPaths.size()) ||
+				trunkIndex >= static_cast<int>(networkPaths.size()) ||
+				trunkIndex >= static_cast<int>(networkToPartIndex.size())) {
+				continue;
+			}
+
+			if (networkToPartIndex[static_cast<size_t>(trunkIndex)] < 0) {
+				continue;
+			}
+
+			const DuctworkPath& branchPath = networkPaths[static_cast<size_t>(branchIndex)];
+			const DuctworkPath& trunkPath = networkPaths[static_cast<size_t>(trunkIndex)];
+			if (branchPath.closed || trunkPath.closed ||
+				branchPath.points.size() < 2 ||
+				trunkPath.points.size() < 2 ||
+				branchPath.layerName != trunkPath.layerName ||
+				!DuctworkLayers::IsColorLayerName(branchPath.layerName)) {
+				continue;
+			}
+
+			int branchEndpointSlot = -1;
+			if (branchEndpointIndex == 0) {
+				branchEndpointSlot = 0;
+			} else if (branchEndpointIndex == static_cast<int>(branchPath.points.size() - 1)) {
+				branchEndpointSlot = 1;
+			}
+			if (branchEndpointSlot < 0) {
+				continue;
+			}
+
+			const DuctworkPoint& unitEndpoint = (branchEndpointSlot == 0) ?
+				branchPath.points.back() :
+				branchPath.points.front();
+			if (!IsPointNear(unitEndpoint, unitAnchorCandidates, unitEndpointTolerance)) {
+				continue;
+			}
+
+			const DuctworkPoint trunkEndpoints[2] = { trunkPath.points.front(), trunkPath.points.back() };
+			for (int endpointSlot = 0; endpointSlot < 2; ++endpointSlot) {
+				const DuctworkPoint& ignorePoint = trunkEndpoints[endpointSlot];
+				if (IsPointNear(ignorePoint, existingIgnoreAnchors, anchorTolerance + 2.0) ||
+					IsPointNear(ignorePoint, runtimeIgnoreAnchors, anchorTolerance + 2.0)) {
+					continue;
+				}
+
+				runtimeIgnoreAnchors.push_back(ignorePoint);
+				existingIgnoreAnchors.push_back(ignorePoint);
+				++unitBranchTrunkEndpointIgnoreCount;
+
+				std::ostringstream stream;
+				stream << "Parts: unit-branch trunk-end ignore added trunkPathIndex=" << trunkIndex
+					<< " trunkEndpoint=" << endpointSlot
+					<< " branchPathIndex=" << branchIndex
+					<< " branchEndpoint=" << branchEndpointIndex
+					<< " point=[" << ignorePoint.x << "," << ignorePoint.y << "]";
+				if (canPersistIgnoreAnchors && CreateAnchorPath(ignoredLayer, ignorePoint, 0.0)) {
+					stream << " persisted=1";
+				} else {
+					stream << " persisted=0";
+				}
+				DuctworkLog::Write(stream.str());
+			}
+		}
+
+		if (unitBranchTrunkEndpointIgnoreCount > 0) {
+			DuctworkLog::Write("Parts: unit-branch trunk-end ignore total=" +
+				std::to_string(unitBranchTrunkEndpointIgnoreCount));
+		}
 	}
 
 	std::vector<DuctworkPoint> unitTerminalAnchors = skipAnchors;
@@ -1646,9 +1786,8 @@ DuctworkPartStats DuctworkParts::CreateAnchorsAndGraphics(const std::vector<Duct
 			for (size_t e = 0; e < 2; ++e) {
 				size_t idx = endpointIndices[e];
 				int endpointIndex = static_cast<int>(idx);
-				if (!forceSegmentIntersectionTerminals &&
-					((distributionTrunk && !allowTerminalRegistersOnTrunk) ||
-						EndpointIsConnected(pathIndex, endpointIndex, connections))) {
+				if ((!forceSegmentIntersectionTerminals && distributionTrunk && !allowTerminalRegistersOnTrunk) ||
+					EndpointIsConnected(pathIndex, endpointIndex, connections)) {
 					removedObsoleteParts += RemoveAutoGeneratedPartsNearPoint(registerLayer,
 						path.points[idx],
 						anchorTolerance + 2.0);
@@ -1776,7 +1915,7 @@ DuctworkPartStats DuctworkParts::CreateAnchorsAndGraphics(const std::vector<Duct
 					++stats.skippedConnected;
 					continue;
 				}
-				if (!forceSegmentIntersectionTerminals && EndpointIsConnected(pathIndex, endpointIndex, connections)) {
+				if (EndpointIsConnected(pathIndex, endpointIndex, connections)) {
 					++stats.skippedConnected;
 					continue;
 				}

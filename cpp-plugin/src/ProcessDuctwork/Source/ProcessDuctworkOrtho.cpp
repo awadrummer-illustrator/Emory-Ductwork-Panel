@@ -392,6 +392,7 @@ OrthoResult DuctworkOrtho::ApplyToPaths(std::vector<DuctworkPath>& paths, double
 	std::vector<std::array<bool, 2>> endpointConnectedEndpoint(paths.size(), { false, false });
 	UnsafeConnectionSummary currentUnsafeConnections =
 		SummarizeUnsafeConnectionsWithContext(paths, documentContextPaths);
+	const UnsafeConnectionSummary preOrthoUnsafeConnections = currentUnsafeConnections;
 
 	if (skipFinalRegisterSegment || skipAllBranchSegments) {
 		for (size_t i = 0; i < preConnections.size(); ++i) {
@@ -683,7 +684,7 @@ OrthoResult DuctworkOrtho::ApplyToPaths(std::vector<DuctworkPath>& paths, double
 			UnsafeConnectionSummary candidateUnsafeConnections;
 			if (!ValidateCandidatePaths(candidatePaths,
 				documentContextPaths,
-				currentUnsafeConnections,
+				preOrthoUnsafeConnections,
 				endpointPath,
 				-1,
 				candidateUnsafeConnections)) {

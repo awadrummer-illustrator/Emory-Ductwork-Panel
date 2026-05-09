@@ -21,6 +21,7 @@ struct ProcessDuctworkOptions
 	bool placedApiGraphics;
 	bool hasRotationOverride;
 	double rotationOverride;
+	double branchTaperReductionPercent;
 
 	ProcessDuctworkOptions();
 

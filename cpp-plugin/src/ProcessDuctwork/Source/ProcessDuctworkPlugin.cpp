@@ -17,6 +17,7 @@
 #include "AILiveEdit.h"
 
 #include <chrono>
+#include <cmath>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
@@ -509,6 +510,671 @@ namespace
 			}
 		}
 		return changedAny;
+	}
+
+	struct EndpointSnapTarget
+	{
+		bool hasStart;
+		bool hasEnd;
+		DuctworkPoint start;
+		DuctworkPoint end;
+		double startDist2;
+		double endDist2;
+
+		EndpointSnapTarget()
+			: hasStart(false),
+			hasEnd(false),
+			start(),
+			end(),
+			startDist2(0.0),
+			endDist2(0.0)
+		{
+		}
+	};
+
+	DuctworkPoint Midpoint(const DuctworkPoint& a, const DuctworkPoint& b)
+	{
+		DuctworkPoint result;
+		result.x = (a.x + b.x) * 0.5;
+		result.y = (a.y + b.y) * 0.5;
+		return result;
+	}
+
+	bool PointsDiffer(const DuctworkPoint& a, const DuctworkPoint& b)
+	{
+		return std::fabs(a.x - b.x) > 1e-6 || std::fabs(a.y - b.y) > 1e-6;
+	}
+
+	void QueueEndpointSnap(std::vector<EndpointSnapTarget>& targets,
+		size_t pathIndex,
+		int endpointSlot,
+		const DuctworkPoint& targetPoint,
+		double dist2)
+	{
+		if (pathIndex >= targets.size()) {
+			return;
+		}
+		EndpointSnapTarget& target = targets[pathIndex];
+		if (endpointSlot == 0) {
+			if (!target.hasStart || dist2 < target.startDist2) {
+				target.hasStart = true;
+				target.start = targetPoint;
+				target.startDist2 = dist2;
+			}
+		} else {
+			if (!target.hasEnd || dist2 < target.endDist2) {
+				target.hasEnd = true;
+				target.end = targetPoint;
+				target.endDist2 = dist2;
+			}
+		}
+	}
+
+	size_t ApplyEndpointSnapTargets(std::vector<DuctworkPath>& paths, const std::vector<EndpointSnapTarget>& targets)
+	{
+		size_t changedEndpoints = 0;
+		for (size_t i = 0; i < paths.size() && i < targets.size(); ++i) {
+			DuctworkPath& path = paths[i];
+			const EndpointSnapTarget& target = targets[i];
+			if ((!target.hasStart && !target.hasEnd) || !path.art || path.points.size() < 2 || path.closed) {
+				continue;
+			}
+
+			ai::int16 count = 0;
+			if (sAIPath->GetPathSegmentCount(path.art, &count) != kNoErr ||
+				count != static_cast<ai::int16>(path.points.size()) ||
+				count <= 0) {
+				continue;
+			}
+
+			std::vector<AIPathSegment> segments(static_cast<size_t>(count));
+			if (sAIPath->GetPathSegments(path.art, 0, count, &segments[0]) != kNoErr) {
+				continue;
+			}
+
+			bool changedPath = false;
+			if (target.hasStart && PointsDiffer(path.points.front(), target.start)) {
+				const ai::int16 segIndex = 0;
+				AIReal dx = static_cast<AIReal>(target.start.x) - segments[segIndex].p.h;
+				AIReal dy = static_cast<AIReal>(target.start.y) - segments[segIndex].p.v;
+				segments[segIndex].p.h = static_cast<AIReal>(target.start.x);
+				segments[segIndex].p.v = static_cast<AIReal>(target.start.y);
+				segments[segIndex].in.h += dx;
+				segments[segIndex].in.v += dy;
+				segments[segIndex].out.h += dx;
+				segments[segIndex].out.v += dy;
+				path.points.front() = target.start;
+				changedPath = true;
+				++changedEndpoints;
+			}
+			if (target.hasEnd && PointsDiffer(path.points.back(), target.end)) {
+				const ai::int16 segIndex = static_cast<ai::int16>(count - 1);
+				AIReal dx = static_cast<AIReal>(target.end.x) - segments[segIndex].p.h;
+				AIReal dy = static_cast<AIReal>(target.end.y) - segments[segIndex].p.v;
+				segments[segIndex].p.h = static_cast<AIReal>(target.end.x);
+				segments[segIndex].p.v = static_cast<AIReal>(target.end.y);
+				segments[segIndex].in.h += dx;
+				segments[segIndex].in.v += dy;
+				segments[segIndex].out.h += dx;
+				segments[segIndex].out.v += dy;
+				path.points.back() = target.end;
+				changedPath = true;
+				++changedEndpoints;
+			}
+
+			if (changedPath) {
+				sAIPath->SetPathSegments(path.art, 0, count, &segments[0]);
+			}
+		}
+		return changedEndpoints;
+	}
+
+	size_t SnapNearSameLayerDuctworkConnections(std::vector<DuctworkPath>& paths,
+		double endpointToEndpointTolerance,
+		double endpointToSegmentTolerance)
+	{
+		if (!sAIPath || paths.size() < 2) {
+			return 0;
+		}
+
+		const double endpointToEndpointTol2 = endpointToEndpointTolerance * endpointToEndpointTolerance;
+		const double endpointToSegmentTol2 = endpointToSegmentTolerance * endpointToSegmentTolerance;
+		std::vector<EndpointSnapTarget> targets(paths.size());
+
+		for (size_t i = 0; i < paths.size(); ++i) {
+			const DuctworkPath& a = paths[i];
+			if (a.points.size() < 2 || a.closed || !DuctworkLayers::IsColorLayerName(a.layerName)) {
+				continue;
+			}
+
+			for (size_t j = i + 1; j < paths.size(); ++j) {
+				const DuctworkPath& b = paths[j];
+				if (b.points.size() < 2 ||
+					b.closed ||
+					a.layerName != b.layerName ||
+					!DuctworkLayers::IsColorLayerName(b.layerName)) {
+					continue;
+				}
+
+				const DuctworkPoint aEndpoints[2] = { a.points.front(), a.points.back() };
+				const DuctworkPoint bEndpoints[2] = { b.points.front(), b.points.back() };
+				for (int ae = 0; ae < 2; ++ae) {
+					for (int be = 0; be < 2; ++be) {
+						const double dist2 = DuctworkMath::Dist2(aEndpoints[ae], bEndpoints[be]);
+						if (dist2 <= endpointToEndpointTol2) {
+							const DuctworkPoint snapPoint = Midpoint(aEndpoints[ae], bEndpoints[be]);
+							QueueEndpointSnap(targets, i, ae, snapPoint, dist2);
+							QueueEndpointSnap(targets, j, be, snapPoint, dist2);
+						}
+					}
+				}
+
+				for (int ae = 0; ae < 2; ++ae) {
+					for (size_t bSeg = 0; bSeg + 1 < b.points.size(); ++bSeg) {
+						double t = 0.0;
+						const DuctworkPoint nearest = DuctworkMath::ClosestPointOnSegment(b.points[bSeg], b.points[bSeg + 1], aEndpoints[ae], t);
+						const double dist2 = DuctworkMath::Dist2(nearest, aEndpoints[ae]);
+						if (t > 1e-4 && t < 0.9999 && dist2 <= endpointToSegmentTol2) {
+							QueueEndpointSnap(targets, i, ae, nearest, dist2);
+						}
+					}
+				}
+
+				for (int be = 0; be < 2; ++be) {
+					for (size_t aSeg = 0; aSeg + 1 < a.points.size(); ++aSeg) {
+						double t = 0.0;
+						const DuctworkPoint nearest = DuctworkMath::ClosestPointOnSegment(a.points[aSeg], a.points[aSeg + 1], bEndpoints[be], t);
+						const double dist2 = DuctworkMath::Dist2(nearest, bEndpoints[be]);
+						if (t > 1e-4 && t < 0.9999 && dist2 <= endpointToSegmentTol2) {
+							QueueEndpointSnap(targets, j, be, nearest, dist2);
+						}
+					}
+				}
+			}
+		}
+
+		return ApplyEndpointSnapTargets(paths, targets);
+	}
+
+	bool LayerCreatesRegister(const std::string& layerName)
+	{
+		return layerName == "Blue Ductwork" ||
+			layerName == "Green Ductwork" ||
+			layerName == "Light Green Ductwork" ||
+			layerName == "Orange Ductwork" ||
+			layerName == "Light Orange Ductwork";
+	}
+
+	bool IsBlueOrOrangeRunLayerName(const std::string& layerName)
+	{
+		return layerName == "Blue Ductwork" ||
+			layerName == "Orange Ductwork";
+	}
+
+	bool EndpointSlotHasConnection(const std::vector<DuctworkPath>& paths,
+		const std::vector<DuctworkConnection>& connections,
+		int pathIndex,
+		int endpointSlot)
+	{
+		if (pathIndex < 0 || pathIndex >= static_cast<int>(paths.size()) ||
+			paths[static_cast<size_t>(pathIndex)].points.size() < 2) {
+			return false;
+		}
+		const int endpointIndex = endpointSlot == 0
+			? 0
+			: static_cast<int>(paths[static_cast<size_t>(pathIndex)].points.size() - 1);
+		for (size_t i = 0; i < connections.size(); ++i) {
+			const DuctworkConnection& connection = connections[i];
+			if (connection.a == pathIndex && connection.endpointA == endpointIndex) {
+				return true;
+			}
+			if (connection.b == pathIndex && connection.endpointB == endpointIndex) {
+				return true;
+			}
+		}
+		return false;
+	}
+
+	bool PathActsAsConnectionTrunk(const std::vector<DuctworkConnection>& connections, int pathIndex)
+	{
+		for (size_t i = 0; i < connections.size(); ++i) {
+			const DuctworkConnection& connection = connections[i];
+			if ((connection.a == pathIndex && connection.segA >= 0 && connection.endpointA < 0) ||
+				(connection.b == pathIndex && connection.segB >= 0 && connection.endpointB < 0)) {
+				return true;
+			}
+		}
+		return false;
+	}
+
+	bool InsertInternalAnchorIntoSingleSegmentPath(DuctworkPath& path, const DuctworkPoint& anchorPoint)
+	{
+		if (!path.art || !sAIPath || path.points.size() != 2 || path.closed) {
+			return false;
+		}
+
+		ai::int16 count = 0;
+		if (sAIPath->GetPathSegmentCount(path.art, &count) != kNoErr || count != 2) {
+			return false;
+		}
+
+		std::vector<AIPathSegment> segments(2);
+		if (sAIPath->GetPathSegments(path.art, 0, count, &segments[0]) != kNoErr) {
+			return false;
+		}
+
+		std::vector<AIPathSegment> updated(3);
+		updated[0] = segments[0];
+		updated[0].in = updated[0].p;
+		updated[0].out = updated[0].p;
+		updated[0].corner = true;
+
+		updated[1].p.h = static_cast<AIReal>(anchorPoint.x);
+		updated[1].p.v = static_cast<AIReal>(anchorPoint.y);
+		updated[1].in = updated[1].p;
+		updated[1].out = updated[1].p;
+		updated[1].corner = true;
+
+		updated[2] = segments[1];
+		updated[2].in = updated[2].p;
+		updated[2].out = updated[2].p;
+		updated[2].corner = true;
+
+		if (sAIPath->SetPathSegmentCount(path.art, 3) != kNoErr ||
+			sAIPath->SetPathSegments(path.art, 0, 3, &updated[0]) != kNoErr) {
+			return false;
+		}
+		sAIPath->SetPathClosed(path.art, false);
+
+		path.points.insert(path.points.begin() + 1, anchorPoint);
+		return true;
+	}
+
+	DuctworkPoint PointAlong(const DuctworkPoint& from, const DuctworkPoint& to, double ratio)
+	{
+		DuctworkPoint point;
+		point.x = from.x + ((to.x - from.x) * ratio);
+		point.y = from.y + ((to.y - from.y) * ratio);
+		return point;
+	}
+
+	bool RewritePathWithPoints(DuctworkPath& path, const std::vector<DuctworkPoint>& updatedPoints)
+	{
+		if (!path.art || !sAIPath || path.closed || updatedPoints.size() < 2) {
+			return false;
+		}
+
+		ai::int16 count = 0;
+		if (sAIPath->GetPathSegmentCount(path.art, &count) != kNoErr ||
+			count != static_cast<ai::int16>(path.points.size())) {
+			return false;
+		}
+
+		std::vector<AIPathSegment> updated(updatedPoints.size());
+		for (size_t i = 0; i < updatedPoints.size(); ++i) {
+			updated[i].p.h = static_cast<AIReal>(updatedPoints[i].x);
+			updated[i].p.v = static_cast<AIReal>(updatedPoints[i].y);
+			updated[i].in = updated[i].p;
+			updated[i].out = updated[i].p;
+			updated[i].corner = true;
+		}
+
+		if (sAIPath->SetPathSegmentCount(path.art, static_cast<ai::int16>(updated.size())) != kNoErr ||
+			sAIPath->SetPathSegments(path.art, 0, static_cast<ai::int16>(updated.size()), &updated[0]) != kNoErr) {
+			return false;
+		}
+		sAIPath->SetPathClosed(path.art, false);
+		path.points = updatedPoints;
+		return true;
+	}
+
+	bool FindSameLayerSegmentIntersectionPoint(const std::vector<DuctworkPath>& paths,
+		const std::vector<DuctworkConnection>& connections,
+		int pathIndex,
+		DuctworkPoint& outPoint)
+	{
+		if (pathIndex < 0 || pathIndex >= static_cast<int>(paths.size())) {
+			return false;
+		}
+
+		const std::string layerName = paths[static_cast<size_t>(pathIndex)].layerName;
+		for (size_t i = 0; i < connections.size(); ++i) {
+			const DuctworkConnection& connection = connections[i];
+			if (connection.type != kConnectionSegmentIntersection) {
+				continue;
+			}
+
+			int otherIndex = -1;
+			if (connection.a == pathIndex) {
+				otherIndex = connection.b;
+			} else if (connection.b == pathIndex) {
+				otherIndex = connection.a;
+			}
+			if (otherIndex < 0 || otherIndex >= static_cast<int>(paths.size())) {
+				continue;
+			}
+			if (paths[static_cast<size_t>(otherIndex)].layerName != layerName) {
+				continue;
+			}
+
+			outPoint = connection.point;
+			return true;
+		}
+
+		const DuctworkPath& path = paths[static_cast<size_t>(pathIndex)];
+		for (size_t otherIndex = 0; otherIndex < paths.size(); ++otherIndex) {
+			if (otherIndex == static_cast<size_t>(pathIndex)) {
+				continue;
+			}
+
+			const DuctworkPath& other = paths[otherIndex];
+			if (other.closed ||
+				other.points.size() < 2 ||
+				other.layerName != layerName) {
+				continue;
+			}
+
+			for (size_t pathSeg = 0; pathSeg + 1 < path.points.size(); ++pathSeg) {
+				for (size_t otherSeg = 0; otherSeg + 1 < other.points.size(); ++otherSeg) {
+					DuctworkPoint intersection;
+					if (!DuctworkMath::SegmentIntersection(path.points[pathSeg],
+						path.points[pathSeg + 1],
+						other.points[otherSeg],
+						other.points[otherSeg + 1],
+						intersection)) {
+						continue;
+					}
+					if (DuctworkMath::Dist(path.points.front(), intersection) <= 10.0 ||
+						DuctworkMath::Dist(path.points.back(), intersection) <= 10.0 ||
+						DuctworkMath::Dist(other.points.front(), intersection) <= 10.0 ||
+						DuctworkMath::Dist(other.points.back(), intersection) <= 10.0) {
+						continue;
+					}
+					outPoint = intersection;
+					return true;
+				}
+			}
+		}
+
+		return false;
+	}
+
+	bool InsertDoubleRegisterTailAnchorsAroundPivot(DuctworkPath& path, const DuctworkPoint& pivot)
+	{
+		if (path.points.size() != 2 && path.points.size() != 3) {
+			return false;
+		}
+		if (DuctworkMath::Dist(path.points.front(), pivot) < 4.0 ||
+			DuctworkMath::Dist(path.points.back(), pivot) < 4.0) {
+			return false;
+		}
+
+		const double tailAnchorRatio = 0.75;
+		std::vector<DuctworkPoint> updatedPoints;
+		if (path.points.size() == 2) {
+			updatedPoints.reserve(4);
+			updatedPoints.push_back(path.points.front());
+			updatedPoints.push_back(PointAlong(pivot, path.points.front(), tailAnchorRatio));
+			updatedPoints.push_back(PointAlong(pivot, path.points.back(), tailAnchorRatio));
+			updatedPoints.push_back(path.points.back());
+			return RewritePathWithPoints(path, updatedPoints);
+		}
+
+		updatedPoints.reserve(5);
+		updatedPoints.push_back(path.points.front());
+		updatedPoints.push_back(PointAlong(pivot, path.points.front(), tailAnchorRatio));
+		updatedPoints.push_back(pivot);
+		updatedPoints.push_back(PointAlong(pivot, path.points.back(), tailAnchorRatio));
+		updatedPoints.push_back(path.points.back());
+		return RewritePathWithPoints(path, updatedPoints);
+	}
+
+	bool GetEndpointSlotForConnection(const DuctworkPath& path,
+		const DuctworkConnection& connection,
+		int pathIndex,
+		int& outEndpointSlot)
+	{
+		outEndpointSlot = -1;
+		if (path.points.size() < 2) {
+			return false;
+		}
+
+		int endpointIndex = -1;
+		if (connection.a == pathIndex) {
+			endpointIndex = connection.endpointA;
+		} else if (connection.b == pathIndex) {
+			endpointIndex = connection.endpointB;
+		}
+		if (endpointIndex < 0) {
+			return false;
+		}
+		if (endpointIndex == 0) {
+			outEndpointSlot = 0;
+			return true;
+		}
+		if (endpointIndex == static_cast<int>(path.points.size() - 1)) {
+			outEndpointSlot = 1;
+			return true;
+		}
+		return false;
+	}
+
+	bool IsUnitPairLayerName(const std::string& a, const std::string& b);
+	bool IsBranchRunLayerName(const std::string& layerName);
+
+	bool FindUnitPairEndpointSlot(const std::vector<DuctworkPath>& paths,
+		const std::vector<DuctworkConnection>& connections,
+		int pathIndex,
+		int& outEndpointSlot)
+	{
+		outEndpointSlot = -1;
+		if (pathIndex < 0 || pathIndex >= static_cast<int>(paths.size())) {
+			return false;
+		}
+
+		const DuctworkPath& path = paths[static_cast<size_t>(pathIndex)];
+		for (size_t i = 0; i < connections.size(); ++i) {
+			const DuctworkConnection& connection = connections[i];
+			if (connection.type != kConnectionEndpointToEndpoint ||
+				(connection.a != pathIndex && connection.b != pathIndex)) {
+				continue;
+			}
+
+			const int otherIndex = connection.a == pathIndex ? connection.b : connection.a;
+			if (otherIndex < 0 || otherIndex >= static_cast<int>(paths.size()) ||
+				!IsUnitPairLayerName(path.layerName, paths[static_cast<size_t>(otherIndex)].layerName)) {
+				continue;
+			}
+
+			int endpointSlot = -1;
+			if (GetEndpointSlotForConnection(path, connection, pathIndex, endpointSlot)) {
+				outEndpointSlot = endpointSlot;
+				return true;
+			}
+		}
+
+		const double toleranceSq = 100.0;
+		const DuctworkPoint endpoints[2] = { path.points.front(), path.points.back() };
+		for (size_t otherIndex = 0; otherIndex < paths.size(); ++otherIndex) {
+			if (otherIndex == static_cast<size_t>(pathIndex)) {
+				continue;
+			}
+			const DuctworkPath& other = paths[otherIndex];
+			if (other.closed ||
+				other.points.size() < 2 ||
+				!IsUnitPairLayerName(path.layerName, other.layerName)) {
+				continue;
+			}
+
+			const DuctworkPoint otherEndpoints[2] = { other.points.front(), other.points.back() };
+			for (int endpointSlot = 0; endpointSlot < 2; ++endpointSlot) {
+				for (int otherEndpointSlot = 0; otherEndpointSlot < 2; ++otherEndpointSlot) {
+					if (DuctworkMath::Dist2(endpoints[endpointSlot], otherEndpoints[otherEndpointSlot]) <= toleranceSq) {
+						outEndpointSlot = endpointSlot;
+						return true;
+					}
+				}
+			}
+		}
+		return false;
+	}
+
+	bool FindSameLayerEndpointToSegmentSlot(const std::vector<DuctworkPath>& paths,
+		const std::vector<DuctworkConnection>& connections,
+		int pathIndex,
+		int& outEndpointSlot)
+	{
+		outEndpointSlot = -1;
+		if (pathIndex < 0 || pathIndex >= static_cast<int>(paths.size())) {
+			return false;
+		}
+
+		const DuctworkPath& path = paths[static_cast<size_t>(pathIndex)];
+		for (size_t i = 0; i < connections.size(); ++i) {
+			const DuctworkConnection& connection = connections[i];
+			if (connection.type != kConnectionEndpointToSegment ||
+				(connection.a != pathIndex && connection.b != pathIndex)) {
+				continue;
+			}
+
+			int otherIndex = -1;
+			bool pathIsEndpoint = false;
+			if (connection.a == pathIndex && connection.endpointA >= 0 && connection.segB >= 0) {
+				otherIndex = connection.b;
+				pathIsEndpoint = true;
+			} else if (connection.b == pathIndex && connection.endpointB >= 0 && connection.segA >= 0) {
+				otherIndex = connection.a;
+				pathIsEndpoint = true;
+			}
+			if (!pathIsEndpoint ||
+				otherIndex < 0 ||
+				otherIndex >= static_cast<int>(paths.size()) ||
+				paths[static_cast<size_t>(otherIndex)].layerName != path.layerName) {
+				continue;
+			}
+
+			int endpointSlot = -1;
+			if (GetEndpointSlotForConnection(path, connection, pathIndex, endpointSlot)) {
+				outEndpointSlot = endpointSlot;
+				return true;
+			}
+		}
+		return false;
+	}
+
+	bool NormalizeUnitPairBranchTaperAnchor(DuctworkPath& path,
+		int unitEndpointSlot,
+		int trunkEndpointSlot)
+	{
+		if (!IsBlueOrOrangeRunLayerName(path.layerName) ||
+			path.closed ||
+			(path.points.size() != 2 && path.points.size() != 3) ||
+			unitEndpointSlot == trunkEndpointSlot ||
+			unitEndpointSlot < 0 ||
+			trunkEndpointSlot < 0) {
+			return false;
+		}
+
+		const DuctworkPoint unitPoint = unitEndpointSlot == 0 ? path.points.front() : path.points.back();
+		const DuctworkPoint trunkPoint = trunkEndpointSlot == 0 ? path.points.front() : path.points.back();
+		if (DuctworkMath::Dist(unitPoint, trunkPoint) < 4.0) {
+			return false;
+		}
+
+		const DuctworkPoint anchorPoint = PointAlong(unitPoint, trunkPoint, 0.65);
+		std::vector<DuctworkPoint> updatedPoints;
+		updatedPoints.reserve(3);
+		updatedPoints.push_back(path.points.front());
+		updatedPoints.push_back(anchorPoint);
+		updatedPoints.push_back(path.points.back());
+		return RewritePathWithPoints(path, updatedPoints);
+	}
+
+	size_t AddRegisterTailAnchors(std::vector<DuctworkPath>& paths)
+	{
+		if (!sAIPath || paths.empty()) {
+			return 0;
+		}
+
+		std::vector<DuctworkConnection> connections;
+		DuctworkConnections::FindConnections(paths, 2.0, 3.0, 15.0, 10.0, true, connections);
+		if (connections.empty()) {
+			return 0;
+		}
+
+		size_t insertedCount = 0;
+		for (size_t i = 0; i < paths.size(); ++i) {
+			DuctworkPath& path = paths[i];
+			const int pathIndex = static_cast<int>(i);
+			int unitPairEndpointSlot = -1;
+			int trunkEndpointSlot = -1;
+			const bool hasUnitPairEndpoint = FindUnitPairEndpointSlot(paths, connections, pathIndex, unitPairEndpointSlot);
+			if (hasUnitPairEndpoint && IsBranchRunLayerName(path.layerName)) {
+				std::ostringstream logStream;
+				logStream << "Unit-pair transition tail anchor skipped pathIndex=" << pathIndex
+					<< " layer=" << path.layerName
+					<< " unitEndpoint=" << unitPairEndpointSlot;
+				DuctworkLog::Write(logStream.str());
+				continue;
+			}
+			if (hasUnitPairEndpoint &&
+				FindSameLayerEndpointToSegmentSlot(paths, connections, pathIndex, trunkEndpointSlot) &&
+				NormalizeUnitPairBranchTaperAnchor(path, unitPairEndpointSlot, trunkEndpointSlot)) {
+				++insertedCount;
+				std::ostringstream logStream;
+				logStream << "Unit-pair branch taper anchor normalized pathIndex=" << pathIndex
+					<< " unitEndpoint=" << unitPairEndpointSlot
+					<< " trunkEndpoint=" << trunkEndpointSlot;
+				DuctworkLog::Write(logStream.str());
+				continue;
+			}
+
+			DuctworkPoint segmentIntersectionPoint;
+			const bool sameLayerSegmentIntersection =
+				FindSameLayerSegmentIntersectionPoint(paths, connections, pathIndex, segmentIntersectionPoint);
+			const bool startConnected = EndpointSlotHasConnection(paths, connections, pathIndex, 0);
+			const bool endConnected = EndpointSlotHasConnection(paths, connections, pathIndex, 1);
+
+			if (!path.closed &&
+				LayerCreatesRegister(path.layerName) &&
+				sameLayerSegmentIntersection &&
+				!startConnected &&
+				!endConnected) {
+				bool inserted = false;
+				if (path.points.size() == 3) {
+					inserted = InsertDoubleRegisterTailAnchorsAroundPivot(path, path.points[1]);
+				} else if (path.points.size() == 2) {
+					inserted = InsertDoubleRegisterTailAnchorsAroundPivot(path, segmentIntersectionPoint);
+				}
+				if (inserted) {
+					++insertedCount;
+					continue;
+				}
+			}
+
+			if (path.points.size() != 2 ||
+				path.closed ||
+				!LayerCreatesRegister(path.layerName) ||
+				PathActsAsConnectionTrunk(connections, pathIndex)) {
+				continue;
+			}
+
+			if (startConnected == endConnected) {
+				continue;
+			}
+
+			const DuctworkPoint nonRegisterSide = startConnected ? path.points.front() : path.points.back();
+			const DuctworkPoint registerSide = startConnected ? path.points.back() : path.points.front();
+			DuctworkPoint anchorPoint;
+			anchorPoint.x = nonRegisterSide.x + ((registerSide.x - nonRegisterSide.x) * 0.65);
+			anchorPoint.y = nonRegisterSide.y + ((registerSide.y - nonRegisterSide.y) * 0.65);
+
+			if (InsertInternalAnchorIntoSingleSegmentPath(path, anchorPoint)) {
+				++insertedCount;
+			}
+		}
+
+		return insertedCount;
 	}
 
 	bool IsUnitPairLayerName(const std::string& a, const std::string& b)
@@ -1101,6 +1767,9 @@ ASErr ProcessDuctworkPlugin::Message(char* caller, char* selector, void* message
 					}
 					if (data.find("enableOverlapCarve") != data.end()) {
 						defaults.enableOverlapCarve = ParseBool(data, "enableOverlapCarve", defaults.enableOverlapCarve);
+					}
+					if (data.find("branchTaperReductionPercent") != data.end()) {
+						defaults.branchTaperReductionPercent = ParseDouble(data, "branchTaperReductionPercent", defaults.branchTaperReductionPercent);
 					}
 					defaults.placedApiGraphics = true;
 					ai::UnicodeString outMsg;
@@ -2094,6 +2763,7 @@ ASErr ProcessDuctworkPlugin::ProcessDuctwork(const ProcessDuctworkOptions& optio
 	RotationOverrideScope rotationScope(options.hasRotationOverride, options.rotationOverride);
 	RegisterRotationScope registerRotationScope(!options.skipRegisterRotation);
 	StepTimer totalTimer("Total");
+	DuctworkGeometry::SetEmoryBranchTaperReductionPercent(options.branchTaperReductionPercent);
 	{
 		std::ostringstream optStream;
 		optStream << "Options skipOrtho=" << options.skipOrtho
@@ -2110,6 +2780,7 @@ ASErr ProcessDuctworkPlugin::ProcessDuctwork(const ProcessDuctworkOptions& optio
 			<< " skipPlacedMetadata=" << options.skipPlacedMetadata
 			<< " directPlaceGraphics=" << options.directPlaceGraphics
 			<< " placedApiGraphics=" << options.placedApiGraphics
+			<< " branchTaperReductionPercent=" << options.branchTaperReductionPercent
 			<< " hasRotationOverride=" << options.hasRotationOverride;
 		DuctworkLog::Write(optStream.str());
 	}
@@ -2182,6 +2853,19 @@ ASErr ProcessDuctworkPlugin::ProcessDuctwork(const ProcessDuctworkOptions& optio
 			sAIUser->MessageAlert(message);
 		}
 		return kNoErr;
+	}
+
+	{
+		StepTimer snapTimer("NearEndpointSnap");
+		const size_t snappedEndpoints = SnapNearSameLayerDuctworkConnections(ductworkPaths, 2.0, 6.0);
+		if (snappedEndpoints > 0) {
+			DuctworkLog::Write("Near same-layer endpoints snapped=" + std::to_string(snappedEndpoints));
+		}
+		const size_t insertedTailAnchors = AddRegisterTailAnchors(ductworkPaths);
+		if (insertedTailAnchors > 0) {
+			DuctworkLog::Write("Register tail path splits inserted=" + std::to_string(insertedTailAnchors));
+		}
+		snapTimer.LogElapsed();
 	}
 
 	size_t deletedEmoryBodies = 0;
@@ -2279,6 +2963,14 @@ ASErr ProcessDuctworkPlugin::ProcessDuctwork(const ProcessDuctworkOptions& optio
 		orthoTimer.LogElapsed();
 		DuctworkLog::Write("Orthogonalize paths touched=" + std::to_string(orthoResult.pathsTouched) +
 			" segmentsSnapped=" + std::to_string(orthoResult.segmentsSnapped));
+		const size_t postOrthoSnappedEndpoints = SnapNearSameLayerDuctworkConnections(ductworkPaths, 2.0, 3.0);
+		if (postOrthoSnappedEndpoints > 0) {
+			DuctworkLog::Write("Post-ortho near same-layer endpoints snapped=" + std::to_string(postOrthoSnappedEndpoints));
+		}
+		const size_t postOrthoTailAnchors = AddRegisterTailAnchors(ductworkPaths);
+		if (postOrthoTailAnchors > 0) {
+			DuctworkLog::Write("Post-ortho register tail path splits inserted=" + std::to_string(postOrthoTailAnchors));
+		}
 	}
 
 	std::vector<DuctworkConnection> connections;
@@ -2354,6 +3046,14 @@ ASErr ProcessDuctworkPlugin::ProcessDuctwork(const ProcessDuctworkOptions& optio
 				continue;
 			}
 			ductworkPaths.push_back(entry);
+		}
+		const size_t postCarveSnappedEndpoints = SnapNearSameLayerDuctworkConnections(ductworkPaths, 2.0, 3.0);
+		if (postCarveSnappedEndpoints > 0) {
+			DuctworkLog::Write("Post-carve near same-layer endpoints snapped=" + std::to_string(postCarveSnappedEndpoints));
+		}
+		const size_t postCarveTailAnchors = AddRegisterTailAnchors(ductworkPaths);
+		if (postCarveTailAnchors > 0) {
+			DuctworkLog::Write("Post-carve register tail path splits inserted=" + std::to_string(postCarveTailAnchors));
 		}
 		connections.clear();
 		DuctworkConnections::FindConnections(

@@ -28,7 +28,7 @@ namespace
 	const double kTrimMultiplier = 0.75;
 	const double kCollinearThreshold = 0.9848;
 	const double kStraightTaperRatio = 0.8;
-	const double kBranchInheritedWidthRatio = 0.75;
+	const double kDefaultBranchInheritedWidthRatio = 0.75;
 	const double kStraightTaperConnectorMinHalfLengthMultiplier = 0.15;
 	const double kStraightTaperConnectorDiffHalfLengthMultiplier = 1.0;
 	const double kRoundMinCenterlineRadiusMultiplier = 0.33;
@@ -86,6 +86,39 @@ namespace
 	const char* const kEmorySourceIdPrefix = "MD:EMORY_SOURCE_ID=";
 
 	void ReadOmittedSegmentIndices(AIArtHandle art, std::set<size_t>& outIndices);
+
+	double gBranchInheritedWidthRatio = kDefaultBranchInheritedWidthRatio;
+	std::set<std::string> gWidthApplyProtectedSourceIds;
+
+	struct ScopedWidthApplyProtectedSourceIds
+	{
+		std::set<std::string> previous;
+
+		ScopedWidthApplyProtectedSourceIds(const std::set<std::string>& sourceIds)
+			: previous(gWidthApplyProtectedSourceIds)
+		{
+			gWidthApplyProtectedSourceIds = sourceIds;
+		}
+
+		~ScopedWidthApplyProtectedSourceIds()
+		{
+			gWidthApplyProtectedSourceIds = previous;
+		}
+	};
+
+	double ClampBranchInheritedWidthRatio(double ratio)
+	{
+		if (!std::isfinite(ratio)) {
+			return kDefaultBranchInheritedWidthRatio;
+		}
+		if (ratio < 0.05) {
+			return 0.05;
+		}
+		if (ratio > 1.0) {
+			return 1.0;
+		}
+		return ratio;
+	}
 
 	std::string DescribeEmoryGeneratedArtRole(const std::string& role)
 	{
@@ -188,6 +221,26 @@ namespace
 		bool touched = false;
 		bool selectedSeed = false;
 	};
+
+	void MarkWidthApplyProtectedSources(std::vector<EmorySourceState>& states)
+	{
+		if (gWidthApplyProtectedSourceIds.empty()) {
+			return;
+		}
+
+		size_t protectedCount = 0;
+		for (size_t i = 0; i < states.size(); ++i) {
+			if (!states[i].sourceId.empty() &&
+				gWidthApplyProtectedSourceIds.find(states[i].sourceId) != gWidthApplyProtectedSourceIds.end()) {
+				states[i].selectedSeed = true;
+				++protectedCount;
+			}
+		}
+
+		if (protectedCount > 0) {
+			DuctworkLog::WriteAlways("Emory width-apply protected selected source rebuild count=" + std::to_string(protectedCount));
+		}
+	}
 
 	struct NetworkConnectorArm
 	{
@@ -797,9 +850,6 @@ namespace
 		}
 
 		AILayerHandle layer = GetOrCreateAnchorLayer("Ignored");
-		if (!layer) {
-			layer = GetOrCreateAnchorLayer("Ignore");
-		}
 		if (!layer || !DuctworkArt::IsLayerChainEditableVisible(layer)) {
 			return false;
 		}
@@ -1263,21 +1313,15 @@ namespace
 		return false;
 	}
 
-	int ResolveDefaultStartSegmentIndex(AIArtHandle sourceArt, size_t segmentCount)
+	bool TryResolveDirectionalDefaultStartSegmentIndex(AIArtHandle sourceArt,
+		const DuctworkPath& path,
+		const std::vector<DuctworkPoint>& points,
+		size_t segmentCount,
+		int& outStartIndex)
 	{
-		if (!sourceArt || segmentCount == 0) {
-			return 0;
-		}
-
-		DuctworkPath path;
-		if (!BuildProcessPathForArt(sourceArt, path) || path.closed || path.points.size() < 2) {
-			return 0;
-		}
-
-		std::vector<DuctworkPoint> points;
-		SanitizePolyline(path.points, points);
-		if (points.size() < 2) {
-			return 0;
+		outStartIndex = 0;
+		if (!sourceArt || segmentCount == 0 || points.size() < 2) {
+			return false;
 		}
 
 		const int lastSegmentIndex = ClampStartSegmentIndex(static_cast<int>(segmentCount - 1), segmentCount);
@@ -1290,7 +1334,8 @@ namespace
 
 		if (IsBlueOrOrangeRunLayer(path.layerName)) {
 			if (startNearPairedRun != endNearPairedRun) {
-				return startNearPairedRun ? 0 : lastSegmentIndex;
+				outStartIndex = startNearPairedRun ? 0 : lastSegmentIndex;
+				return true;
 			}
 
 			std::vector<DuctworkPoint> unitAttachmentPoints;
@@ -1298,13 +1343,15 @@ namespace
 			const bool startNearUnit = IsPointNearAny(startPoint, unitAttachmentPoints, 10.0);
 			const bool endNearUnit = IsPointNearAny(endPoint, unitAttachmentPoints, 10.0);
 			if (startNearUnit != endNearUnit) {
-				return startNearUnit ? 0 : lastSegmentIndex;
+				outStartIndex = startNearUnit ? 0 : lastSegmentIndex;
+				return true;
 			}
 		}
 
 		if (IsGreenOrLightOrangeRunLayer(path.layerName)) {
 			if (startNearPairedRun != endNearPairedRun) {
-				return startNearPairedRun ? lastSegmentIndex : 0;
+				outStartIndex = startNearPairedRun ? lastSegmentIndex : 0;
+				return true;
 			}
 
 			std::vector<DuctworkPoint> unitAttachmentPoints;
@@ -1312,8 +1359,48 @@ namespace
 			const bool startNearUnit = IsPointNearAny(startPoint, unitAttachmentPoints, 10.0);
 			const bool endNearUnit = IsPointNearAny(endPoint, unitAttachmentPoints, 10.0);
 			if (startNearUnit != endNearUnit) {
-				return startNearUnit ? lastSegmentIndex : 0;
+				outStartIndex = startNearUnit ? lastSegmentIndex : 0;
+				return true;
 			}
+		}
+
+		return false;
+	}
+
+	bool TryResolveDirectionalStartForArt(AIArtHandle sourceArt, size_t segmentCount, int& outStartIndex)
+	{
+		outStartIndex = 0;
+		if (!sourceArt || segmentCount == 0) {
+			return false;
+		}
+
+		DuctworkPath path;
+		if (!BuildProcessPathForArt(sourceArt, path) || path.closed || path.points.size() < 2) {
+			return false;
+		}
+
+		std::vector<DuctworkPoint> points;
+		SanitizePolyline(path.points, points);
+		if (points.size() < 2) {
+			return false;
+		}
+
+		return TryResolveDirectionalDefaultStartSegmentIndex(sourceArt,
+			path,
+			points,
+			segmentCount,
+			outStartIndex);
+	}
+
+	int ResolveDefaultStartSegmentIndex(AIArtHandle sourceArt, size_t segmentCount)
+	{
+		if (!sourceArt || segmentCount == 0) {
+			return 0;
+		}
+
+		int directionalStartIndex = 0;
+		if (TryResolveDirectionalStartForArt(sourceArt, segmentCount, directionalStartIndex)) {
+			return directionalStartIndex;
 		}
 
 		return 0;
@@ -2740,6 +2827,7 @@ namespace
 		const Vec2& outwardDir,
 		double availableLength,
 		double desiredLength,
+		double widthOverride,
 		NetworkConnectorArm& outArm)
 	{
 		outArm = NetworkConnectorArm();
@@ -2769,7 +2857,10 @@ namespace
 		if (outArm.angle < 0.0) {
 			outArm.angle += (3.141592653589793 * 2.0);
 		}
-		outArm.width = state.widths[segmentIndex] > kMinDuctWidth ? state.widths[segmentIndex] : kMinDuctWidth;
+		outArm.width = widthOverride > kMinDuctWidth ? widthOverride : state.widths[segmentIndex];
+		if (!std::isfinite(outArm.width) || outArm.width < kMinDuctWidth) {
+			outArm.width = kMinDuctWidth;
+		}
 		outArm.availableLength = availableLength;
 		DescribeStateSegmentDisplay(state, segmentIndex,
 			outArm.chainHorizontal, outArm.chainVertical,
@@ -2785,6 +2876,26 @@ namespace
 			outArm.taperAlignment, outArm.taperReferenceWidth,
 			outArm.outerLeft, outArm.outerRight);
 		return true;
+	}
+
+	bool BuildNetworkConnectorArm(const EmorySourceState& state,
+		int stateIndex,
+		int segmentIndex,
+		const DuctworkPoint& connectionPoint,
+		const Vec2& outwardDir,
+		double availableLength,
+		double desiredLength,
+		NetworkConnectorArm& outArm)
+	{
+		return BuildNetworkConnectorArm(state,
+			stateIndex,
+			segmentIndex,
+			connectionPoint,
+			outwardDir,
+			availableLength,
+			desiredLength,
+			0.0,
+			outArm);
 	}
 
 	bool BuildNetworkConnectorPolygon(const NetworkConnectorSpec& connector, std::vector<DuctworkPoint>& outPolygon)
@@ -3886,6 +3997,59 @@ namespace
 		ApplyPolylineTaperContinuityFromAnchor(points, clampedStartSegmentIndex, widths);
 	}
 
+	bool NormalizeBlueOrangeUnitEndpointTaper(const std::string& layerName,
+		const std::vector<DuctworkPoint>& points,
+		std::vector<double>& widths)
+	{
+		if (!IsBlueOrOrangeRunLayer(layerName) ||
+			points.size() < 2 ||
+			widths.empty() ||
+			widths.size() != points.size() - 1) {
+			return false;
+		}
+
+		std::vector<DuctworkPoint> unitAttachmentPoints;
+		CollectUnitAttachmentPoints(unitAttachmentPoints);
+		if (unitAttachmentPoints.empty()) {
+			return false;
+		}
+
+		const bool unitAtStart = IsPointNearAny(points.front(), unitAttachmentPoints, 10.0);
+		const bool unitAtEnd = IsPointNearAny(points.back(), unitAttachmentPoints, 10.0);
+		if (unitAtStart == unitAtEnd) {
+			return false;
+		}
+
+		const int rootSegmentIndex = unitAtStart ? 0 : static_cast<int>(widths.size() - 1);
+		const int direction = unitAtStart ? 1 : -1;
+		double currentWidth = widths[static_cast<size_t>(rootSegmentIndex)];
+		if (!std::isfinite(currentWidth) || currentWidth < kMinDuctWidth) {
+			currentWidth = kMinDuctWidth;
+		}
+
+		bool changed = false;
+		if (!NearlyEqual(widths[static_cast<size_t>(rootSegmentIndex)], currentWidth, 0.001)) {
+			widths[static_cast<size_t>(rootSegmentIndex)] = currentWidth;
+			changed = true;
+		}
+
+		for (int segmentIndex = rootSegmentIndex + direction;
+			segmentIndex >= 0 && segmentIndex < static_cast<int>(widths.size());
+			segmentIndex += direction) {
+			const double nextWidth = (std::max)(currentWidth * kStraightTaperRatio, kMinDuctWidth);
+			const double existingWidth = widths[static_cast<size_t>(segmentIndex)];
+			if (!std::isfinite(existingWidth) ||
+				existingWidth > currentWidth + 0.001 ||
+				NearlyEqual(existingWidth, currentWidth, 0.001)) {
+				widths[static_cast<size_t>(segmentIndex)] = nextWidth;
+				changed = true;
+			}
+			currentWidth = widths[static_cast<size_t>(segmentIndex)];
+		}
+
+		return changed;
+	}
+
 	bool ReadStoredSourceBodyWidth(AIArtHandle sourceArt, double& outWidth)
 	{
 		outWidth = 0.0;
@@ -4426,6 +4590,11 @@ namespace
 			return 0;
 		}
 
+		int directionalStartIndex = 0;
+		if (TryResolveDirectionalStartForArt(sourceArt, segmentCount, directionalStartIndex)) {
+			return directionalStartIndex;
+		}
+
 		double startValue = 0.0;
 		if (!DuctworkMetadata::GetDouble(sourceArt, kEmoryStartSegmentIndexKey, startValue)) {
 			return ResolveDefaultStartSegmentIndex(sourceArt, segmentCount);
@@ -4436,6 +4605,23 @@ namespace
 
 	bool HasExplicitStartSegmentIndex(AIArtHandle sourceArt)
 	{
+		if (sourceArt) {
+			DuctworkPath path;
+			if (BuildProcessPathForArt(sourceArt, path) && path.points.size() >= 2 && !path.closed) {
+				std::vector<DuctworkPoint> points;
+				SanitizePolyline(path.points, points);
+				if (points.size() >= 2) {
+					int directionalStartIndex = 0;
+					if (TryResolveDirectionalDefaultStartSegmentIndex(sourceArt,
+						path,
+						points,
+						points.size() - 1,
+						directionalStartIndex)) {
+						return false;
+					}
+				}
+			}
+		}
 		double startValue = 0.0;
 		return sourceArt && DuctworkMetadata::GetDouble(sourceArt, kEmoryStartSegmentIndexKey, startValue);
 	}
@@ -5660,7 +5846,12 @@ void ClearStartSegmentIndex(AIArtHandle sourceArt)
 
 		const double trunkWidth = trunkState.widths[trunkAttachment.segmentIndex];
 		const double branchWidth = branchState.widths[branchSegmentIndex];
-		const double connectorBodyWidth = (std::max)(trunkWidth, branchWidth);
+		const double connectorBodyWidth = (std::isfinite(trunkWidth) && trunkWidth > kMinDuctWidth)
+			? trunkWidth
+			: (std::max)(trunkWidth, branchWidth);
+		const double branchConnectorWidth = (std::isfinite(connectorBodyWidth) && connectorBodyWidth > kMinDuctWidth)
+			? (std::min)(branchWidth, connectorBodyWidth)
+			: branchWidth;
 		const double desiredLength = (std::max)(connectorBodyWidth * kNetworkConnectorDesiredLengthMultiplier, 3.0);
 
 		NetworkConnectorArm arm;
@@ -5685,7 +5876,7 @@ void ClearStartSegmentIndex(AIArtHandle sourceArt)
 		if (!BuildNetworkConnectorArm(branchState, branchIndex, branchSegmentIndex, connection.point,
 			branchDir,
 			std::hypot(branchOtherPoint.x - connection.point.x, branchOtherPoint.y - connection.point.y),
-			desiredLength, arm)) {
+			desiredLength, branchConnectorWidth, arm)) {
 			return false;
 		}
 		outSpec.arms.push_back(arm);
@@ -6232,8 +6423,7 @@ void ClearStartSegmentIndex(AIArtHandle sourceArt)
 		size_t changedCount = 0;
 		for (size_t transitionIndex = 0; transitionIndex < states.size(); ++transitionIndex) {
 			EmorySourceState& transitionState = states[transitionIndex];
-			if (affectedSourceIds.find(transitionState.sourceId) == affectedSourceIds.end() ||
-				!IsGreenOrLightOrangeRunLayer(transitionState.path.layerName)) {
+			if (!IsGreenOrLightOrangeRunLayer(transitionState.path.layerName)) {
 				continue;
 			}
 
@@ -6242,8 +6432,13 @@ void ClearStartSegmentIndex(AIArtHandle sourceArt)
 					continue;
 				}
 
-				const EmorySourceState& mainState = states[mainIndex];
+				EmorySourceState& mainState = states[mainIndex];
 				if (!IsUnitPairTransitionToMain(transitionState.path.layerName, mainState.path.layerName)) {
+					continue;
+				}
+				const bool mainAffected = affectedSourceIds.find(mainState.sourceId) != affectedSourceIds.end();
+				const bool transitionAffected = affectedSourceIds.find(transitionState.sourceId) != affectedSourceIds.end();
+				if (!mainAffected && !transitionAffected) {
 					continue;
 				}
 
@@ -6255,20 +6450,38 @@ void ClearStartSegmentIndex(AIArtHandle sourceArt)
 						continue;
 					}
 
-					const double sourceWidth = (mainAttachment.segmentIndex >= 0 &&
-						mainAttachment.segmentIndex < static_cast<int>(mainState.widths.size()))
-						? mainState.widths[mainAttachment.segmentIndex]
-						: 0.0;
-					if (SyncEndpointWidthFromState(mainState, mainAttachment, transitionState, transitionAttachment)) {
-						++changedCount;
-						std::ostringstream logStream;
-						logStream << "Emory direct unit-pair width sync initial transition="
-							<< transitionState.sourceId
-							<< " main=" << mainState.sourceId
-							<< " point=[" << unitAttachmentPoints[pointIndex].x << "," << unitAttachmentPoints[pointIndex].y << "]"
-							<< " sourceWidth=" << sourceWidth
-							<< " transitionSegment=" << transitionAttachment.segmentIndex;
-						DuctworkLog::Write(logStream.str());
+					if (mainAffected && !transitionState.selectedSeed) {
+						const double sourceWidth = (mainAttachment.segmentIndex >= 0 &&
+							mainAttachment.segmentIndex < static_cast<int>(mainState.widths.size()))
+							? mainState.widths[mainAttachment.segmentIndex]
+							: 0.0;
+						if (SyncEndpointWidthFromState(mainState, mainAttachment, transitionState, transitionAttachment)) {
+							++changedCount;
+							std::ostringstream logStream;
+							logStream << "Emory direct unit-pair width sync initial direction=main-to-transition transition="
+								<< transitionState.sourceId
+								<< " main=" << mainState.sourceId
+								<< " point=[" << unitAttachmentPoints[pointIndex].x << "," << unitAttachmentPoints[pointIndex].y << "]"
+								<< " sourceWidth=" << sourceWidth
+								<< " transitionSegment=" << transitionAttachment.segmentIndex;
+							DuctworkLog::Write(logStream.str());
+						}
+					} else if (transitionAffected && !mainState.selectedSeed) {
+						const double sourceWidth = (transitionAttachment.segmentIndex >= 0 &&
+							transitionAttachment.segmentIndex < static_cast<int>(transitionState.widths.size()))
+							? transitionState.widths[transitionAttachment.segmentIndex]
+							: 0.0;
+						if (SyncEndpointWidthFromState(transitionState, transitionAttachment, mainState, mainAttachment)) {
+							++changedCount;
+							std::ostringstream logStream;
+							logStream << "Emory direct unit-pair width sync initial direction=transition-to-main transition="
+								<< transitionState.sourceId
+								<< " main=" << mainState.sourceId
+								<< " point=[" << unitAttachmentPoints[pointIndex].x << "," << unitAttachmentPoints[pointIndex].y << "]"
+								<< " sourceWidth=" << sourceWidth
+								<< " mainSegment=" << mainAttachment.segmentIndex;
+							DuctworkLog::Write(logStream.str());
+						}
 					}
 				}
 			}
@@ -7310,26 +7523,32 @@ void ClearStartSegmentIndex(AIArtHandle sourceArt)
 			return false;
 		}
 
-		double inheritedRootWidth = trunkState.widths[trunkAttachment.segmentIndex] * kBranchInheritedWidthRatio;
+		double inheritedRootWidth = trunkState.widths[trunkAttachment.segmentIndex] * gBranchInheritedWidthRatio;
 		if (!std::isfinite(inheritedRootWidth) || inheritedRootWidth < kMinDuctWidth) {
 			inheritedRootWidth = kMinDuctWidth;
 		}
-		if (branchState.hasStoredSegmentWidths &&
-			(branchState.hasExplicitStart ||
-				!NearlyEqual(branchState.widths[branchRootSegmentIndex], trunkState.widths[trunkAttachment.segmentIndex], 0.001))) {
-			return false;
+		int inheritedStartSegmentIndex = branchRootSegmentIndex;
+		bool persistInheritedStartSegment = true;
+		int directionalStartSegmentIndex = 0;
+		if (TryResolveDirectionalDefaultStartSegmentIndex(branchState.art,
+			branchState.path,
+			branchState.path.points,
+			branchState.segmentCount,
+			directionalStartSegmentIndex)) {
+			inheritedStartSegmentIndex = directionalStartSegmentIndex;
+			persistInheritedStartSegment = false;
 		}
-
 		std::vector<double> inheritedWidths(branchState.widths.size(), inheritedRootWidth);
 		ApplyDefaultStraightChainTapers(branchState.art,
 			branchState.path.points,
-			branchRootSegmentIndex,
+			inheritedStartSegmentIndex,
 			inheritedWidths);
 		if (branchRootSegmentIndex >= 0 && branchRootSegmentIndex < static_cast<int>(inheritedWidths.size())) {
 			inheritedWidths[branchRootSegmentIndex] = inheritedRootWidth;
 		}
 
-		bool changed = branchState.startSegmentIndex != branchRootSegmentIndex ||
+		bool changed = branchState.startSegmentIndex != inheritedStartSegmentIndex ||
+			branchState.hasExplicitStart != persistInheritedStartSegment ||
 			branchState.widths.size() != inheritedWidths.size();
 		if (!changed) {
 			for (size_t i = 0; i < inheritedWidths.size(); ++i) {
@@ -7346,8 +7565,8 @@ void ClearStartSegmentIndex(AIArtHandle sourceArt)
 		branchState.widths = inheritedWidths;
 		branchState.originalWidths = inheritedWidths;
 		branchState.defaultWidth = ResolveMaxSegmentWidth(branchState.widths, inheritedRootWidth);
-		branchState.startSegmentIndex = branchRootSegmentIndex;
-		branchState.hasExplicitStart = true;
+		branchState.startSegmentIndex = inheritedStartSegmentIndex;
+		branchState.hasExplicitStart = persistInheritedStartSegment;
 		branchState.touched = true;
 		return true;
 	}
@@ -7358,6 +7577,76 @@ void ClearStartSegmentIndex(AIArtHandle sourceArt)
 			!unitAttachmentPoints.empty() &&
 			(IsPointNearAny(state.path.points.front(), unitAttachmentPoints, 10.0) ||
 				IsPointNearAny(state.path.points.back(), unitAttachmentPoints, 10.0));
+	}
+
+	bool StateEndpointSlotNearAny(const EmorySourceState& state,
+		int endpointSlot,
+		const std::vector<DuctworkPoint>& points,
+		double tolerance)
+	{
+		if (state.path.points.size() < 2 || points.empty()) {
+			return false;
+		}
+		if (endpointSlot == 0) {
+			return IsPointNearAny(state.path.points.front(), points, tolerance);
+		}
+		if (endpointSlot == 1) {
+			return IsPointNearAny(state.path.points.back(), points, tolerance);
+		}
+		return false;
+	}
+
+	bool ResolveUnitFeederEndpointToSegmentConnection(const DuctworkConnection& connection,
+		const std::vector<EmorySourceState>& states,
+		const std::vector<DuctworkPoint>& unitAttachmentPoints,
+		int& outFeederIndex,
+		PathConnectionAttachment& outFeederAttachment,
+		int& outDownstreamIndex,
+		PathConnectionAttachment& outDownstreamAttachment)
+	{
+		outFeederIndex = -1;
+		outDownstreamIndex = -1;
+		outFeederAttachment = PathConnectionAttachment();
+		outDownstreamAttachment = PathConnectionAttachment();
+		if (unitAttachmentPoints.empty()) {
+			return false;
+		}
+
+		int trunkIndex = -1;
+		int branchIndex = -1;
+		if (!IsEndpointToSegmentBranchConnection(connection, trunkIndex, branchIndex) ||
+			trunkIndex < 0 || trunkIndex >= static_cast<int>(states.size()) ||
+			branchIndex < 0 || branchIndex >= static_cast<int>(states.size())) {
+			return false;
+		}
+
+		const EmorySourceState& feederState = states[branchIndex];
+		const EmorySourceState& downstreamState = states[trunkIndex];
+		if (feederState.path.layerName != downstreamState.path.layerName ||
+			!IsBlueOrOrangeRunLayer(feederState.path.layerName)) {
+			return false;
+		}
+
+		PathConnectionAttachment feederAttachment;
+		PathConnectionAttachment downstreamAttachment;
+		if (!DescribeConnectionForPath(connection, branchIndex, feederState, feederAttachment) ||
+			!DescribeConnectionForPath(connection, trunkIndex, downstreamState, downstreamAttachment) ||
+			feederAttachment.endpointSlot < 0 ||
+			feederAttachment.segmentIndex < 0 ||
+			downstreamAttachment.segmentIndex < 0) {
+			return false;
+		}
+
+		const int unitEndpointSlot = (feederAttachment.endpointSlot == 0) ? 1 : 0;
+		if (!StateEndpointSlotNearAny(feederState, unitEndpointSlot, unitAttachmentPoints, 10.0)) {
+			return false;
+		}
+
+		outFeederIndex = branchIndex;
+		outFeederAttachment = feederAttachment;
+		outDownstreamIndex = trunkIndex;
+		outDownstreamAttachment = downstreamAttachment;
+		return true;
 	}
 
 	bool ResolveUnitTrunkSegmentIntersection(const DuctworkConnection& connection,
@@ -7393,6 +7682,169 @@ void ClearStartSegmentIndex(AIArtHandle sourceArt)
 		return true;
 	}
 
+	int CountRegisterEndpointAttachments(const EmorySourceState& state, const std::vector<DuctworkPoint>& registerAttachmentPoints)
+	{
+		if (state.path.points.size() < 2 || registerAttachmentPoints.empty()) {
+			return 0;
+		}
+
+		int count = 0;
+		if (IsPointNearAny(state.path.points.front(), registerAttachmentPoints, 10.0)) {
+			++count;
+		}
+		if (IsPointNearAny(state.path.points.back(), registerAttachmentPoints, 10.0)) {
+			++count;
+		}
+		return count;
+	}
+
+	double ComputeStatePathLength(const EmorySourceState& state)
+	{
+		double length = 0.0;
+		for (size_t i = 0; i + 1 < state.path.points.size(); ++i) {
+			length += DuctworkMath::Dist(state.path.points[i], state.path.points[i + 1]);
+		}
+		return length;
+	}
+
+	bool ResolveSameLayerSegmentIntersectionBranch(const DuctworkConnection& connection,
+		const std::vector<EmorySourceState>& states,
+		const std::vector<DuctworkConnection>& connections,
+		const std::vector<DuctworkPoint>& unitAttachmentPoints,
+		const std::vector<DuctworkPoint>& registerAttachmentPoints,
+		int& outTrunkIndex,
+		int& outBranchIndex)
+	{
+		outTrunkIndex = -1;
+		outBranchIndex = -1;
+		if (connection.type != kConnectionSegmentIntersection ||
+			connection.a < 0 || connection.a >= static_cast<int>(states.size()) ||
+			connection.b < 0 || connection.b >= static_cast<int>(states.size())) {
+			return false;
+		}
+
+		const EmorySourceState& stateA = states[connection.a];
+		const EmorySourceState& stateB = states[connection.b];
+		if (stateA.path.layerName != stateB.path.layerName ||
+			connection.segA < 0 || connection.segA >= stateA.segmentCount ||
+			connection.segB < 0 || connection.segB >= stateB.segmentCount) {
+			return false;
+		}
+
+		if (ResolveUnitTrunkSegmentIntersection(connection, states, unitAttachmentPoints, outTrunkIndex, outBranchIndex)) {
+			return true;
+		}
+
+		const bool aIsBranchRole = IsBranchRole(stateA.ductRole);
+		const bool bIsBranchRole = IsBranchRole(stateB.ductRole);
+		if (aIsBranchRole != bIsBranchRole) {
+			outTrunkIndex = aIsBranchRole ? connection.b : connection.a;
+			outBranchIndex = aIsBranchRole ? connection.a : connection.b;
+			return true;
+		}
+
+		const bool aIsEndpointBranchChild = PathIsBranchChild(connection.a, connections);
+		const bool bIsEndpointBranchChild = PathIsBranchChild(connection.b, connections);
+		if (aIsEndpointBranchChild != bIsEndpointBranchChild) {
+			outTrunkIndex = aIsEndpointBranchChild ? connection.b : connection.a;
+			outBranchIndex = aIsEndpointBranchChild ? connection.a : connection.b;
+			return true;
+		}
+
+		const int aChildCount = CountEndpointToSegmentBranchChildren(connection.a, connections);
+		const int bChildCount = CountEndpointToSegmentBranchChildren(connection.b, connections);
+		if ((aChildCount > 0) != (bChildCount > 0)) {
+			outTrunkIndex = (aChildCount > 0) ? connection.a : connection.b;
+			outBranchIndex = (aChildCount > 0) ? connection.b : connection.a;
+			return true;
+		}
+
+		const int aRegisterEndpoints = CountRegisterEndpointAttachments(stateA, registerAttachmentPoints);
+		const int bRegisterEndpoints = CountRegisterEndpointAttachments(stateB, registerAttachmentPoints);
+		if (aRegisterEndpoints != bRegisterEndpoints) {
+			outTrunkIndex = (aRegisterEndpoints > bRegisterEndpoints) ? connection.b : connection.a;
+			outBranchIndex = (aRegisterEndpoints > bRegisterEndpoints) ? connection.a : connection.b;
+			return true;
+		}
+
+		const double widthA = stateA.widths[connection.segA];
+		const double widthB = stateB.widths[connection.segB];
+		if (std::isfinite(widthA) &&
+			std::isfinite(widthB) &&
+			std::fabs(widthA - widthB) > 0.001) {
+			outTrunkIndex = (widthA >= widthB) ? connection.a : connection.b;
+			outBranchIndex = (widthA >= widthB) ? connection.b : connection.a;
+			return true;
+		}
+
+		const double lengthA = ComputeStatePathLength(stateA);
+		const double lengthB = ComputeStatePathLength(stateB);
+		if (std::fabs(lengthA - lengthB) > 0.001) {
+			outTrunkIndex = (lengthA >= lengthB) ? connection.a : connection.b;
+			outBranchIndex = (lengthA >= lengthB) ? connection.b : connection.a;
+			return true;
+		}
+
+		return false;
+	}
+
+	bool ApplyContinuationWidthFromUnitFeeder(const EmorySourceState& feederState,
+		const PathConnectionAttachment& feederAttachment,
+		EmorySourceState& downstreamState,
+		const PathConnectionAttachment& downstreamAttachment)
+	{
+		if (feederAttachment.segmentIndex < 0 ||
+			feederAttachment.segmentIndex >= static_cast<int>(feederState.widths.size()) ||
+			downstreamAttachment.segmentIndex < 0 ||
+			downstreamAttachment.segmentIndex >= static_cast<int>(downstreamState.widths.size())) {
+			return false;
+		}
+
+		double rootWidth = feederState.widths[feederAttachment.segmentIndex];
+		if (!std::isfinite(rootWidth) || rootWidth < kMinDuctWidth) {
+			rootWidth = kMinDuctWidth;
+		}
+
+		std::vector<double> inheritedWidths(downstreamState.widths.size(), rootWidth);
+		ApplyDefaultStraightChainTapers(downstreamState.art,
+			downstreamState.path.points,
+			downstreamAttachment.segmentIndex,
+			inheritedWidths);
+		inheritedWidths[downstreamAttachment.segmentIndex] = rootWidth;
+
+		bool changed = downstreamState.startSegmentIndex != downstreamAttachment.segmentIndex ||
+			!downstreamState.hasExplicitStart ||
+			downstreamState.widths.size() != inheritedWidths.size();
+		if (!changed) {
+			for (size_t i = 0; i < inheritedWidths.size(); ++i) {
+				if (!NearlyEqual(downstreamState.widths[i], inheritedWidths[i], 0.001)) {
+					changed = true;
+					break;
+				}
+			}
+		}
+		if (!changed) {
+			return false;
+		}
+
+		downstreamState.widths = inheritedWidths;
+		downstreamState.originalWidths = inheritedWidths;
+		downstreamState.defaultWidth = ResolveMaxSegmentWidth(downstreamState.widths, rootWidth);
+		downstreamState.startSegmentIndex = downstreamAttachment.segmentIndex;
+		downstreamState.hasExplicitStart = true;
+		downstreamState.touched = true;
+		{
+			std::ostringstream logStream;
+			logStream << "Emory unit-feeder downstream root applied feeder="
+				<< feederState.sourceId
+				<< " downstream=" << downstreamState.sourceId
+				<< " rootSegment=" << downstreamAttachment.segmentIndex
+				<< " rootWidth=" << rootWidth;
+			DuctworkLog::Write(logStream.str());
+		}
+		return true;
+	}
+
 	bool ApplyInheritedWidthToBranchSegmentState(const EmorySourceState& trunkState,
 		int trunkSegmentIndex,
 		EmorySourceState& branchState,
@@ -7405,26 +7857,32 @@ void ClearStartSegmentIndex(AIArtHandle sourceArt)
 			return false;
 		}
 
-		double inheritedRootWidth = trunkState.widths[trunkSegmentIndex] * kBranchInheritedWidthRatio;
+		double inheritedRootWidth = trunkState.widths[trunkSegmentIndex] * gBranchInheritedWidthRatio;
 		if (!std::isfinite(inheritedRootWidth) || inheritedRootWidth < kMinDuctWidth) {
 			inheritedRootWidth = kMinDuctWidth;
 		}
-		if (branchState.hasStoredSegmentWidths &&
-			(branchState.hasExplicitStart ||
-				!NearlyEqual(branchState.widths[branchSegmentIndex], trunkState.widths[trunkSegmentIndex], 0.001))) {
-			return false;
+		int inheritedStartSegmentIndex = branchSegmentIndex;
+		bool persistInheritedStartSegment = true;
+		int directionalStartSegmentIndex = 0;
+		if (TryResolveDirectionalDefaultStartSegmentIndex(branchState.art,
+			branchState.path,
+			branchState.path.points,
+			branchState.segmentCount,
+			directionalStartSegmentIndex)) {
+			inheritedStartSegmentIndex = directionalStartSegmentIndex;
+			persistInheritedStartSegment = false;
 		}
-
 		std::vector<double> inheritedWidths(branchState.widths.size(), inheritedRootWidth);
 		ApplyDefaultStraightChainTapers(branchState.art,
 			branchState.path.points,
-			branchSegmentIndex,
+			inheritedStartSegmentIndex,
 			inheritedWidths);
 		if (branchSegmentIndex >= 0 && branchSegmentIndex < static_cast<int>(inheritedWidths.size())) {
 			inheritedWidths[branchSegmentIndex] = inheritedRootWidth;
 		}
 
-		bool changed = branchState.startSegmentIndex != branchSegmentIndex ||
+		bool changed = branchState.startSegmentIndex != inheritedStartSegmentIndex ||
+			branchState.hasExplicitStart != persistInheritedStartSegment ||
 			branchState.widths.size() != inheritedWidths.size();
 		if (!changed) {
 			for (size_t i = 0; i < inheritedWidths.size(); ++i) {
@@ -7441,8 +7899,8 @@ void ClearStartSegmentIndex(AIArtHandle sourceArt)
 		branchState.widths = inheritedWidths;
 		branchState.originalWidths = inheritedWidths;
 		branchState.defaultWidth = ResolveMaxSegmentWidth(branchState.widths, inheritedRootWidth);
-		branchState.startSegmentIndex = branchSegmentIndex;
-		branchState.hasExplicitStart = true;
+		branchState.startSegmentIndex = inheritedStartSegmentIndex;
+		branchState.hasExplicitStart = persistInheritedStartSegment;
 		branchState.touched = true;
 		return true;
 	}
@@ -7458,6 +7916,8 @@ void ClearStartSegmentIndex(AIArtHandle sourceArt)
 
 		std::vector<DuctworkPoint> unitAttachmentPoints;
 		CollectUnitAttachmentPoints(unitAttachmentPoints);
+		std::vector<DuctworkPoint> registerAttachmentPoints;
+		CollectRegisterAttachmentPoints(registerAttachmentPoints);
 
 		size_t directUnitPairSyncs = 0;
 		const size_t maxPasses = states.size() + 1;
@@ -7475,23 +7935,65 @@ void ClearStartSegmentIndex(AIArtHandle sourceArt)
 					unitPairMainAttachment,
 					unitPairTransitionIndex,
 					unitPairTransitionAttachment)) {
-					if (unitPairTransitionIndex >= 0 &&
+					const bool mainAffected = unitPairMainIndex >= 0 &&
+						unitPairMainIndex < static_cast<int>(states.size()) &&
+						affectedSourceIds.find(states[unitPairMainIndex].sourceId) != affectedSourceIds.end();
+					const bool transitionAffected = unitPairTransitionIndex >= 0 &&
 						unitPairTransitionIndex < static_cast<int>(states.size()) &&
-						affectedSourceIds.find(states[unitPairTransitionIndex].sourceId) != affectedSourceIds.end() &&
+						affectedSourceIds.find(states[unitPairTransitionIndex].sourceId) != affectedSourceIds.end();
+					if (mainAffected &&
+						!states[unitPairTransitionIndex].selectedSeed &&
 						SyncEndpointWidthFromState(states[unitPairMainIndex],
 							unitPairMainAttachment,
 							states[unitPairTransitionIndex],
 							unitPairTransitionAttachment)) {
 						changedThisPass = true;
+						++directUnitPairSyncs;
+					} else if (transitionAffected &&
+						!states[unitPairMainIndex].selectedSeed &&
+						SyncEndpointWidthFromState(states[unitPairTransitionIndex],
+							unitPairTransitionAttachment,
+							states[unitPairMainIndex],
+							unitPairMainAttachment)) {
+						changedThisPass = true;
+						++directUnitPairSyncs;
 					}
 					continue;
 				}
 
 				int trunkIndex = -1;
 				int branchIndex = -1;
+				int unitFeederIndex = -1;
+				int unitFeederDownstreamIndex = -1;
+				PathConnectionAttachment unitFeederAttachment;
+				PathConnectionAttachment unitFeederDownstreamAttachment;
+				if (ResolveUnitFeederEndpointToSegmentConnection(connections[connectionIndex],
+					states,
+					unitAttachmentPoints,
+					unitFeederIndex,
+					unitFeederAttachment,
+					unitFeederDownstreamIndex,
+					unitFeederDownstreamAttachment)) {
+					const bool feederAffected = unitFeederIndex >= 0 &&
+						unitFeederIndex < static_cast<int>(states.size()) &&
+						affectedSourceIds.find(states[unitFeederIndex].sourceId) != affectedSourceIds.end();
+					if (feederAffected &&
+						unitFeederDownstreamIndex >= 0 &&
+						unitFeederDownstreamIndex < static_cast<int>(states.size()) &&
+						!states[unitFeederDownstreamIndex].selectedSeed &&
+						ApplyContinuationWidthFromUnitFeeder(states[unitFeederIndex],
+							unitFeederAttachment,
+							states[unitFeederDownstreamIndex],
+							unitFeederDownstreamAttachment)) {
+						changedThisPass = true;
+					}
+					continue;
+				}
+
 				if (IsEndpointToSegmentBranchConnection(connections[connectionIndex], trunkIndex, branchIndex)) {
 					if (trunkIndex < 0 || trunkIndex >= static_cast<int>(states.size()) ||
 						branchIndex < 0 || branchIndex >= static_cast<int>(states.size()) ||
+						states[branchIndex].selectedSeed ||
 						affectedSourceIds.find(states[branchIndex].sourceId) == affectedSourceIds.end()) {
 						continue;
 					}
@@ -7510,13 +8012,16 @@ void ClearStartSegmentIndex(AIArtHandle sourceArt)
 					continue;
 				}
 
-				if (!ResolveUnitTrunkSegmentIntersection(connections[connectionIndex],
+				if (!ResolveSameLayerSegmentIntersectionBranch(connections[connectionIndex],
 					states,
+					connections,
 					unitAttachmentPoints,
+					registerAttachmentPoints,
 					trunkIndex,
 					branchIndex) ||
 					trunkIndex < 0 || trunkIndex >= static_cast<int>(states.size()) ||
 					branchIndex < 0 || branchIndex >= static_cast<int>(states.size()) ||
+					states[branchIndex].selectedSeed ||
 					affectedSourceIds.find(states[branchIndex].sourceId) == affectedSourceIds.end()) {
 					continue;
 				}
@@ -7559,7 +8064,7 @@ void ClearStartSegmentIndex(AIArtHandle sourceArt)
 			logStream << "Emory branch width inheritance applied sources=" << touchedCount
 				<< " connections=" << connections.size()
 				<< " unitPairSyncs=" << directUnitPairSyncs
-				<< " factor=" << kBranchInheritedWidthRatio;
+				<< " factor=" << gBranchInheritedWidthRatio;
 			DuctworkLog::Write(logStream.str());
 		}
 		return touchedCount;
@@ -7582,7 +8087,11 @@ void ClearStartSegmentIndex(AIArtHandle sourceArt)
 			}
 
 			WriteSegmentWidths(state.art, state.widths);
-			WriteStartSegmentIndex(state.art, state.startSegmentIndex);
+			if (state.hasExplicitStart) {
+				WriteStartSegmentIndex(state.art, state.startSegmentIndex);
+			} else {
+				ClearStartSegmentIndex(state.art);
+			}
 			WriteStoredSourceBodyWidth(state.art, ResolveMaxSegmentWidth(state.widths, state.defaultWidth));
 			persistedSourceIds.insert(state.sourceId);
 		}
@@ -7595,11 +8104,144 @@ void ClearStartSegmentIndex(AIArtHandle sourceArt)
 		}
 	}
 
+	bool RefreshBranchRootWidthFromParent(const EmorySourceState& trunkState,
+		int trunkSegmentIndex,
+		EmorySourceState& branchState,
+		int branchRootSegmentIndex)
+	{
+		if (trunkSegmentIndex < 0 ||
+			trunkSegmentIndex >= static_cast<int>(trunkState.widths.size()) ||
+			branchRootSegmentIndex < 0 ||
+			branchRootSegmentIndex >= static_cast<int>(branchState.widths.size())) {
+			return false;
+		}
+
+		double inheritedRootWidth = trunkState.widths[trunkSegmentIndex] * gBranchInheritedWidthRatio;
+		if (!std::isfinite(inheritedRootWidth) || inheritedRootWidth < kMinDuctWidth) {
+			inheritedRootWidth = kMinDuctWidth;
+		}
+
+		const bool changed = !NearlyEqual(branchState.widths[branchRootSegmentIndex], inheritedRootWidth, 0.001);
+		branchState.widths[branchRootSegmentIndex] = inheritedRootWidth;
+		branchState.defaultWidth = ResolveMaxSegmentWidth(branchState.widths, inheritedRootWidth);
+		branchState.touched = true;
+		return changed;
+	}
+
+	size_t RefreshAffectedBranchRootWidthsFromParents(std::vector<EmorySourceState>& states, const std::set<std::string>& affectedSourceIds)
+	{
+		if (states.size() < 2 || affectedSourceIds.empty()) {
+			return 0;
+		}
+
+		std::vector<DuctworkConnection> connections;
+		CollectEmoryNetworkConnections(states, connections);
+
+		std::vector<DuctworkPoint> unitAttachmentPoints;
+		CollectUnitAttachmentPoints(unitAttachmentPoints);
+		std::vector<DuctworkPoint> registerAttachmentPoints;
+		CollectRegisterAttachmentPoints(registerAttachmentPoints);
+
+		size_t refreshedCount = 0;
+		for (size_t connectionIndex = 0; connectionIndex < connections.size(); ++connectionIndex) {
+			int trunkIndex = -1;
+			int branchIndex = -1;
+			int unitFeederIndex = -1;
+			int unitFeederDownstreamIndex = -1;
+			PathConnectionAttachment unitFeederAttachment;
+			PathConnectionAttachment unitFeederDownstreamAttachment;
+			if (ResolveUnitFeederEndpointToSegmentConnection(connections[connectionIndex],
+				states,
+				unitAttachmentPoints,
+				unitFeederIndex,
+				unitFeederAttachment,
+				unitFeederDownstreamIndex,
+				unitFeederDownstreamAttachment)) {
+				if (unitFeederIndex >= 0 &&
+					unitFeederIndex < static_cast<int>(states.size()) &&
+					affectedSourceIds.find(states[unitFeederIndex].sourceId) != affectedSourceIds.end() &&
+					unitFeederDownstreamIndex >= 0 &&
+					unitFeederDownstreamIndex < static_cast<int>(states.size()) &&
+					ApplyContinuationWidthFromUnitFeeder(states[unitFeederIndex],
+						unitFeederAttachment,
+						states[unitFeederDownstreamIndex],
+						unitFeederDownstreamAttachment)) {
+					++refreshedCount;
+				}
+				continue;
+			}
+
+			if (IsEndpointToSegmentBranchConnection(connections[connectionIndex], trunkIndex, branchIndex)) {
+				if (trunkIndex < 0 || trunkIndex >= static_cast<int>(states.size()) ||
+					branchIndex < 0 || branchIndex >= static_cast<int>(states.size()) ||
+					affectedSourceIds.find(states[branchIndex].sourceId) == affectedSourceIds.end()) {
+					continue;
+				}
+
+				PathConnectionAttachment trunkAttachment;
+				PathConnectionAttachment branchAttachment;
+				if (!DescribeConnectionForPath(connections[connectionIndex], trunkIndex, states[trunkIndex], trunkAttachment) ||
+					!DescribeConnectionForPath(connections[connectionIndex], branchIndex, states[branchIndex], branchAttachment) ||
+					branchAttachment.endpointSlot < 0 ||
+					trunkAttachment.segmentIndex < 0) {
+					continue;
+				}
+
+				const int branchRootSegmentIndex = (branchAttachment.endpointSlot == 0) ? 0 : (states[branchIndex].segmentCount - 1);
+				if (RefreshBranchRootWidthFromParent(states[trunkIndex],
+					trunkAttachment.segmentIndex,
+					states[branchIndex],
+					branchRootSegmentIndex)) {
+					++refreshedCount;
+				}
+				continue;
+			}
+
+			if (!ResolveSameLayerSegmentIntersectionBranch(connections[connectionIndex],
+				states,
+				connections,
+				unitAttachmentPoints,
+				registerAttachmentPoints,
+				trunkIndex,
+				branchIndex) ||
+				trunkIndex < 0 || trunkIndex >= static_cast<int>(states.size()) ||
+				branchIndex < 0 || branchIndex >= static_cast<int>(states.size()) ||
+				affectedSourceIds.find(states[branchIndex].sourceId) == affectedSourceIds.end()) {
+				continue;
+			}
+
+			const int trunkSegmentIndex = (trunkIndex == connections[connectionIndex].a)
+				? connections[connectionIndex].segA
+				: connections[connectionIndex].segB;
+			const int branchSegmentIndex = (branchIndex == connections[connectionIndex].a)
+				? connections[connectionIndex].segA
+				: connections[connectionIndex].segB;
+			if (RefreshBranchRootWidthFromParent(states[trunkIndex],
+				trunkSegmentIndex,
+				states[branchIndex],
+				branchSegmentIndex)) {
+				++refreshedCount;
+			}
+		}
+
+		if (refreshedCount > 0) {
+			std::ostringstream logStream;
+			logStream << "Emory width-apply refreshed selected branch roots from parents count="
+				<< refreshedCount
+				<< " connections=" << connections.size()
+				<< " factor=" << gBranchInheritedWidthRatio;
+			DuctworkLog::WriteAlways(logStream.str());
+		}
+		return refreshedCount;
+	}
+
 	void CascadeConnectedBranchWidths(std::vector<EmorySourceState>& states, const std::vector<DuctworkConnection>& connections)
 	{
 		std::vector<int> queue;
 		std::vector<DuctworkPoint> unitAttachmentPoints;
 		CollectUnitAttachmentPoints(unitAttachmentPoints);
+		std::vector<DuctworkPoint> registerAttachmentPoints;
+		CollectRegisterAttachmentPoints(registerAttachmentPoints);
 
 		for (size_t i = 0; i < states.size(); ++i) {
 			if (states[i].touched) {
@@ -7612,10 +8254,40 @@ void ClearStartSegmentIndex(AIArtHandle sourceArt)
 			CascadeDirectUnitPairEndpointWidthsFromState(states, currentIndex, unitAttachmentPoints, queue);
 			for (size_t connectionIndex = 0; connectionIndex < connections.size(); ++connectionIndex) {
 				const DuctworkConnection& connection = connections[connectionIndex];
+				int unitFeederIndex = -1;
+				int unitFeederDownstreamIndex = -1;
+				PathConnectionAttachment unitFeederAttachment;
+				PathConnectionAttachment unitFeederDownstreamAttachment;
+				if (ResolveUnitFeederEndpointToSegmentConnection(connection,
+					states,
+					unitAttachmentPoints,
+					unitFeederIndex,
+					unitFeederAttachment,
+					unitFeederDownstreamIndex,
+					unitFeederDownstreamAttachment)) {
+					if (currentIndex == unitFeederIndex &&
+						unitFeederDownstreamIndex >= 0 &&
+						unitFeederDownstreamIndex < static_cast<int>(states.size()) &&
+						!states[unitFeederDownstreamIndex].selectedSeed &&
+						ApplyContinuationWidthFromUnitFeeder(states[unitFeederIndex],
+							unitFeederAttachment,
+							states[unitFeederDownstreamIndex],
+							unitFeederDownstreamAttachment)) {
+						queue.push_back(unitFeederDownstreamIndex);
+					}
+					continue;
+				}
+
 				if (connection.type == kConnectionSegmentIntersection) {
 					int trunkIndex = -1;
 					int branchIndex = -1;
-					if (!ResolveUnitTrunkSegmentIntersection(connection, states, unitAttachmentPoints, trunkIndex, branchIndex) ||
+					if (!ResolveSameLayerSegmentIntersectionBranch(connection,
+						states,
+						connections,
+						unitAttachmentPoints,
+						registerAttachmentPoints,
+						trunkIndex,
+						branchIndex) ||
 						currentIndex != trunkIndex ||
 						branchIndex < 0 || branchIndex >= static_cast<int>(states.size()) ||
 						states[branchIndex].selectedSeed) {
@@ -8784,6 +9456,16 @@ bool BuildRoundCornerPolygon(const ConnectorSpec& connector, const CornerPairing
 			startSegmentIndex,
 			bodyWidth,
 			segmentWidths);
+		bool normalizedUnitEndpointTaper = false;
+		if (!HasStoredSegmentWidths(path.art, segmentCount)) {
+			ApplyDefaultStraightChainTapers(path.art, points, startSegmentIndex, segmentWidths);
+			WriteSegmentWidths(path.art, segmentWidths);
+		}
+		if (NormalizeBlueOrangeUnitEndpointTaper(path.layerName, points, segmentWidths)) {
+			normalizedUnitEndpointTaper = true;
+			WriteSegmentWidths(path.art, segmentWidths);
+			WriteStoredSourceBodyWidth(path.art, ResolveMaxSegmentWidth(segmentWidths, bodyWidth));
+		}
 		bool omitStartSegmentThickness = ReadFinalSegmentThicknessFlag(path.art, kEmoryOmitStartSegmentThicknessKey);
 		bool omitEndSegmentThickness = ReadFinalSegmentThicknessFlag(path.art, kEmoryOmitEndSegmentThicknessKey);
 		std::string omitStartTerminalStyle = ReadTerminalSegmentStyle(path.art, true);
@@ -8814,13 +9496,11 @@ bool BuildRoundCornerPolygon(const ConnectorSpec& connector, const CornerPairing
 				<< " localMap=" << (hasLocalSegmentOmitMap ? 1 : 0)
 				<< " backupMap=" << (hasBackupSegmentOmitMap ? 1 : 0)
 				<< " omittedSegments=[" << SerializeSegmentIndexSet(effectiveOmittedSegments) << "]"
+				<< " widths=[" << SerializeSegmentWidths(segmentWidths) << "]"
+				<< " unitEndpointTaperNormalized=" << (normalizedUnitEndpointTaper ? 1 : 0)
 				<< " start=" << SerializePointForLog(points.front())
 				<< " end=" << SerializePointForLog(points.back());
 			DuctworkLog::Write(logStream.str());
-		}
-		if (!HasStoredSegmentWidths(path.art, segmentCount)) {
-			ApplyDefaultStraightChainTapers(path.art, points, startSegmentIndex, segmentWidths);
-			WriteSegmentWidths(path.art, segmentWidths);
 		}
 		std::vector<StraightChainInfo> straightChains;
 		std::vector<int> straightChainIndexBySegment;
@@ -9271,6 +9951,20 @@ bool DuctworkGeometry::IsGeneratedEmoryBody(AIArtHandle art)
 	return IsGeneratedEmoryArtInternal(art);
 }
 
+void DuctworkGeometry::SetEmoryBranchTaperReductionPercent(double reductionPercent)
+{
+	if (!std::isfinite(reductionPercent)) {
+		reductionPercent = 25.0;
+	}
+	if (reductionPercent < 0.0) {
+		reductionPercent = 0.0;
+	}
+	if (reductionPercent > 95.0) {
+		reductionPercent = 95.0;
+	}
+	gBranchInheritedWidthRatio = ClampBranchInheritedWidthRatio((100.0 - reductionPercent) / 100.0);
+}
+
 bool DuctworkGeometry::IsCenterlineCandidate(AIArtHandle art,
 	const std::vector<DuctworkPoint>& points,
 	bool closed,
@@ -9515,6 +10209,7 @@ void DuctworkGeometry::UpdateSelectedEmoryFinalSegmentThicknessMetadata(const st
 		10.0,
 		true,
 		allConnections);
+	std::vector<DuctworkConnection> rawAllConnections = allConnections;
 	{
 		std::vector<DuctworkPoint> ignorePoints;
 		CollectIgnoreAnchorPoints(ignorePoints);
@@ -9607,6 +10302,56 @@ void DuctworkGeometry::UpdateSelectedEmoryFinalSegmentThicknessMetadata(const st
 		return false;
 	};
 
+	const auto pathActsAsUnitEndpointBranchTrunk = [&](AIArtHandle art) {
+		std::map<AIArtHandle, int>::const_iterator it = artIndexByHandle.find(art);
+		if (it == artIndexByHandle.end()) {
+			return false;
+		}
+		const int pathIndex = it->second;
+		if (pathIndex < 0 || pathIndex >= static_cast<int>(allPaths.size())) {
+			return false;
+		}
+
+		const DuctworkPath& trunkPath = allPaths[static_cast<size_t>(pathIndex)];
+		for (size_t connectionIndex = 0; connectionIndex < rawAllConnections.size(); ++connectionIndex) {
+			const DuctworkConnection& connection = rawAllConnections[connectionIndex];
+			int trunkIndex = -1;
+			int branchIndex = -1;
+			if (!IsEndpointToSegmentBranchConnection(connection, trunkIndex, branchIndex) ||
+				trunkIndex != pathIndex ||
+				branchIndex < 0 ||
+				branchIndex >= static_cast<int>(allPaths.size())) {
+				continue;
+			}
+
+			const DuctworkPath& branchPath = allPaths[static_cast<size_t>(branchIndex)];
+			if (branchPath.closed ||
+				trunkPath.closed ||
+				branchPath.points.size() < 2 ||
+				trunkPath.points.size() < 2 ||
+				branchPath.layerName != trunkPath.layerName ||
+				!DuctworkLayers::IsColorLayerName(branchPath.layerName)) {
+				continue;
+			}
+
+			const int branchEndpointIndex = (connection.a == branchIndex) ?
+				connection.endpointA :
+				connection.endpointB;
+			int branchEndpointSlot = -1;
+			if (!GetEndpointSlotForPath(branchPath, branchEndpointIndex, branchEndpointSlot)) {
+				continue;
+			}
+
+			const DuctworkPoint& unitEndpoint = (branchEndpointSlot == 0) ?
+				branchPath.points.back() :
+				branchPath.points.front();
+			if (IsPointNearAny(unitEndpoint, unitAttachmentPoints, 10.0)) {
+				return true;
+			}
+		}
+		return false;
+	};
+
 	std::set<std::string> processedSourceIds;
 	for (size_t i = 0; i < paths.size(); ++i) {
 		const DuctworkPath& path = paths[i];
@@ -9656,8 +10401,10 @@ void DuctworkGeometry::UpdateSelectedEmoryFinalSegmentThicknessMetadata(const st
 		bool sourceActsAsTrunkConnection = false;
 		bool sourceHasSegmentIntersection = false;
 		bool sourceHasSameColorSegmentIntersection = false;
+		bool sourceHasUnitEndpointBranchTrunk = false;
+		bool protectedFromOmittingAllSegments = false;
 
-		if (enabled && !registerAttachmentPoints.empty() && sourcePoints.size() >= 2) {
+		if (enabled && sourcePoints.size() >= 2) {
 			const bool registerAtStart = IsPointNearAny(sourcePoints.front(), registerAttachmentPoints, 10.0);
 			const bool registerAtEnd = IsPointNearAny(sourcePoints.back(), registerAttachmentPoints, 10.0);
 			const bool rectangularRegisterAtStart = IsPointNearAny(sourcePoints.front(), rectangularRegisterAttachmentPoints, 10.0);
@@ -9685,6 +10432,9 @@ void DuctworkGeometry::UpdateSelectedEmoryFinalSegmentThicknessMetadata(const st
 				if (pathHasSameColorSegmentIntersection(candidate.art)) {
 					sourceHasSameColorSegmentIntersection = true;
 				}
+				if (pathActsAsUnitEndpointBranchTrunk(candidate.art)) {
+					sourceHasUnitEndpointBranchTrunk = true;
+				}
 
 				const bool startConnected = endpointConnected(candidate.art, 0);
 				const bool endConnected = endpointConnected(candidate.art, static_cast<int>(candidate.points.size() - 1));
@@ -9708,7 +10458,10 @@ void DuctworkGeometry::UpdateSelectedEmoryFinalSegmentThicknessMetadata(const st
 			}
 
 			const bool preserveTerminalOmitForDoubleRegisterSegmentIntersection =
-				sourceHasSameColorSegmentIntersection && registerAtStart && registerAtEnd;
+				!sourceHasUnitEndpointBranchTrunk &&
+				sourceHasSameColorSegmentIntersection &&
+				registerAtStart &&
+				registerAtEnd;
 			if (preserveTerminalOmitForDoubleRegisterSegmentIntersection) {
 				// Same-color crossovers with registers on both ends should keep the through
 				// run thick except for the true register-connected terminal segments.
@@ -9758,6 +10511,17 @@ void DuctworkGeometry::UpdateSelectedEmoryFinalSegmentThicknessMetadata(const st
 					}
 				}
 			}
+
+			const size_t sourceSegmentCount = sourcePoints.size() - 1;
+			if (sourceSegmentCount > 0 && omittedSegmentIndices.size() >= sourceSegmentCount) {
+				// A short run can have every segment classified as a terminal segment.
+				// Keep the body rather than turning a valid register-to-register run
+				// into registers and no Emory ductwork.
+				omitStart = false;
+				omitEnd = false;
+				omittedSegmentIndices.clear();
+				protectedFromOmittingAllSegments = true;
+			}
 		}
 
 		WriteFinalSegmentThicknessMetadata(metadataArt, omitStart, omitEnd);
@@ -9775,6 +10539,8 @@ void DuctworkGeometry::UpdateSelectedEmoryFinalSegmentThicknessMetadata(const st
 				<< " trunkConnection=" << (sourceActsAsTrunkConnection ? 1 : 0)
 				<< " segmentIntersection=" << (sourceHasSegmentIntersection ? 1 : 0)
 				<< " sameColorSegmentIntersection=" << (sourceHasSameColorSegmentIntersection ? 1 : 0)
+				<< " unitEndpointBranchTrunk=" << (sourceHasUnitEndpointBranchTrunk ? 1 : 0)
+				<< " protectedFromOmittingAllSegments=" << (protectedFromOmittingAllSegments ? 1 : 0)
 				<< " omitStart=" << (omitStart ? 1 : 0)
 				<< " omitEnd=" << (omitEnd ? 1 : 0)
 				<< " omittedSegments=[" << SerializeSegmentIndexSet(omittedSegmentIndices) << "]"
@@ -9897,7 +10663,10 @@ EmoryBodyStats DuctworkGeometry::GenerateEmoryBodies(const std::vector<DuctworkP
 
 		std::vector<EmorySourceState> sourceStates;
 		std::map<std::string, int> stateIndexBySourceId;
-		if (CollectEmorySourceStates(sourceStates, stateIndexBySourceId) &&
+		if (CollectEmorySourceStates(sourceStates, stateIndexBySourceId)) {
+			MarkWidthApplyProtectedSources(sourceStates);
+		}
+		if (!sourceStates.empty() &&
 			ApplyInheritedBranchWidths(sourceStates, affectedSourceIdSet) > 0) {
 			PersistInheritedBranchWidths(sourceStates, affectedSourceIdSet);
 		}
@@ -11253,6 +12022,59 @@ bool DuctworkGeometry::SelectSelectedEmoryFinalSegments(std::string& outMessage)
 	return true;
 }
 
+namespace
+{
+	bool ResetOpenPathHandlesToCorners(AIArtHandle art)
+	{
+		if (!art || !sAIPath) {
+			return false;
+		}
+
+		ai::int16 segmentCount = 0;
+		if (sAIPath->GetPathSegmentCount(art, &segmentCount) != kNoErr || segmentCount < 1) {
+			return false;
+		}
+
+		std::vector<AIPathSegment> segments(static_cast<size_t>(segmentCount));
+		if (sAIPath->GetPathSegments(art, 0, segmentCount, &segments[0]) != kNoErr) {
+			return false;
+		}
+
+		for (ai::int16 i = 0; i < segmentCount; ++i) {
+			segments[i].in = segments[i].p;
+			segments[i].out = segments[i].p;
+			segments[i].corner = true;
+		}
+		return sAIPath->SetPathSegments(art, 0, segmentCount, &segments[0]) == kNoErr;
+	}
+
+	size_t TurnFinalCurvesOffForSourceIds(const std::vector<std::string>& sourceIds)
+	{
+		size_t updatedCount = 0;
+		std::set<AIArtHandle> updatedArts;
+		for (size_t i = 0; i < sourceIds.size(); ++i) {
+			if (sourceIds[i].empty()) {
+				continue;
+			}
+
+			std::vector<AIArtHandle> arts;
+			CollectCenterlineAndBackupArtsForSourceId(sourceIds[i], arts);
+			for (size_t artIndex = 0; artIndex < arts.size(); ++artIndex) {
+				AIArtHandle art = arts[artIndex];
+				if (!art || !updatedArts.insert(art).second) {
+					continue;
+				}
+				WriteTerminalSegmentStyle(art, true, "straight");
+				WriteTerminalSegmentStyle(art, false, "straight");
+				if (ResetOpenPathHandlesToCorners(art)) {
+					++updatedCount;
+				}
+			}
+		}
+		return updatedCount;
+	}
+}
+
 bool DuctworkGeometry::RevertSelectedEmoryToCenterlines(std::string& outMessage)
 {
 	outMessage = "Select generated Emory ductwork or its source centerline first.";
@@ -11361,6 +12183,7 @@ bool DuctworkGeometry::RevertSelectedEmoryToCenterlines(std::string& outMessage)
 	std::vector<std::string> sourceIds(sourceIdSet.begin(), sourceIdSet.end());
 	deleteSourceIdSet.insert(sourceIdSet.begin(), sourceIdSet.end());
 	std::vector<std::string> deleteSourceIds(deleteSourceIdSet.begin(), deleteSourceIdSet.end());
+	const size_t finalCurvesStraightened = TurnFinalCurvesOffForSourceIds(sourceIds);
 	{
 		std::ostringstream logStream;
 		logStream << "Emory revert-start sourceIds=";
@@ -11378,6 +12201,7 @@ bool DuctworkGeometry::RevertSelectedEmoryToCenterlines(std::string& outMessage)
 			logStream << deleteSourceIds[i];
 		}
 		logStream << " generatedSelectionCount=" << generatedSelectionCount;
+		logStream << " finalCurvesStraightened=" << finalCurvesStraightened;
 		DuctworkLog::Write(logStream.str());
 	}
 	const size_t removed = DeleteGeneratedEmoryBodies(deleteSourceIds);
@@ -12533,9 +13357,19 @@ bool DuctworkGeometry::ApplySelectedEmorySegmentWidth(double newWidth, std::stri
 		}
 	}
 
+	std::set<std::string> selectedSourceIds;
+	for (std::map<int, std::vector<int> >::const_iterator it = selectedIndicesByState.begin(); it != selectedIndicesByState.end(); ++it) {
+		if (it->first >= 0 &&
+			it->first < static_cast<int>(states.size()) &&
+			!states[it->first].sourceId.empty()) {
+			selectedSourceIds.insert(states[it->first].sourceId);
+		}
+	}
+
 	std::vector<DuctworkConnection> widthConnections;
 	if (terminalOnlyWidthSelection) {
-		DuctworkLog::WriteAlways("Emory width-apply terminal-only selection: branch cascade skipped");
+		DuctworkLog::WriteAlways("Emory width-apply terminal-only selection: branch cascade skipped, parent roots refreshed");
+		RefreshAffectedBranchRootWidthsFromParents(states, selectedSourceIds);
 	} else {
 		CollectEmoryNetworkConnections(states, widthConnections);
 		CascadeConnectedBranchWidths(states, widthConnections);
@@ -12627,7 +13461,11 @@ bool DuctworkGeometry::ApplySelectedEmorySegmentWidth(double newWidth, std::stri
 	auto t0 = std::chrono::steady_clock::now();
 	DeleteGeneratedEmoryBodies(deleteSourceIdList);
 	auto t1 = std::chrono::steady_clock::now();
-	EmoryBodyStats stats = GenerateEmoryBodies(regeneratePaths);
+	EmoryBodyStats stats;
+	{
+		ScopedWidthApplyProtectedSourceIds protectSelectedSources(selectedSourceIds);
+		stats = GenerateEmoryBodies(regeneratePaths);
+	}
 	auto t2 = std::chrono::steady_clock::now();
 	SelectGeneratedSegmentsByStateMap(states, finalSelectedIndicesByState);
 	auto t3 = std::chrono::steady_clock::now();
