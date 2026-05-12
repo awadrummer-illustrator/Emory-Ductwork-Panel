@@ -451,45 +451,87 @@ namespace
 		return DuctworkNotes::SetNote(path, note.str());
 	}
 
-	bool SetPlacedMetadata(AIArtHandle placed, double rotation)
+	bool IsPositiveFinite(double value)
+	{
+		return std::isfinite(value) && value > 0.001;
+	}
+
+	bool GetPlacedNaturalSize(AIArtHandle placed, double& outWidth, double& outHeight)
+	{
+		outWidth = 0.0;
+		outHeight = 0.0;
+		if (!placed || !sAIPlaced) {
+			return false;
+		}
+
+		AIRealPoint size{};
+		AIRealRect viewBounds{};
+		AIRealMatrix viewMatrix{};
+		AIRealRect imageBounds{};
+		AIRealMatrix imageMatrix{};
+		if (sAIPlaced->GetPlacedDimensions(placed, &size, &viewBounds, &viewMatrix, &imageBounds, &imageMatrix) == kNoErr) {
+			outWidth = std::fabs(static_cast<double>(size.h));
+			outHeight = std::fabs(static_cast<double>(size.v));
+			if (IsPositiveFinite(outWidth) && IsPositiveFinite(outHeight)) {
+				return true;
+			}
+		}
+
+		AIRealRect bbox{};
+		if (sAIPlaced->GetPlacedBoundingBox(placed, &bbox) == kNoErr) {
+			outWidth = std::fabs(static_cast<double>(bbox.right) - static_cast<double>(bbox.left));
+			outHeight = std::fabs(static_cast<double>(bbox.top) - static_cast<double>(bbox.bottom));
+			if (IsPositiveFinite(outWidth) && IsPositiveFinite(outHeight)) {
+				return true;
+			}
+		}
+		return false;
+	}
+
+	bool SetPlacedMetadata(AIArtHandle placed, double rotation, double currentScalePercent, double originalWidth, double originalHeight)
 	{
 		if (!placed) {
 			return false;
 		}
-		std::string note = DuctworkNotes::GetNote(placed);
-		std::vector<std::string> tokens = DuctworkNotes::SplitTokens(note);
-		std::vector<std::string> mdTags;
-		for (size_t i = 0; i < tokens.size(); ++i) {
-			if (tokens[i].find("MD:") == 0) {
-				mdTags.push_back(tokens[i]);
-			}
-		}
 		double normalized = NormalizeAngle(rotation);
-		std::map<std::string, std::string> fields;
-		fields["MDUX_RotationOverride"] = std::to_string(normalized);
-		fields["MDUX_CumulativeRotation"] = "\"" + std::to_string(normalized) + "\"";
-		std::string json = DuctworkNotes::SerializeMetaJson(fields);
-		std::string updated = DuctworkNotes::BuildNoteWithMDUXMeta(json, mdTags);
-		const bool noteOk = DuctworkNotes::SetNote(placed, updated);
+		if (!IsPositiveFinite(currentScalePercent)) {
+			currentScalePercent = DuctworkMetadata::ReadScaleOrDefault(placed, 100.0);
+		}
+		if (!IsPositiveFinite(currentScalePercent)) {
+			currentScalePercent = 100.0;
+		}
 		DuctworkMetadata::SetDouble(placed, "MDUX_RotationOverride", normalized);
 		DuctworkMetadata::SetDouble(placed, "MDUX_CumulativeRotation", normalized);
+		DuctworkMetadata::SetDouble(placed, "MDUX_CurrentScale", currentScalePercent);
+		DuctworkMetadata::SetDouble(placed, "MDUX_OriginalScale", 100.0);
+		if (IsPositiveFinite(originalWidth) && IsPositiveFinite(originalHeight)) {
+			DuctworkMetadata::SetDouble(placed, "MDUX_OriginalWidth", originalWidth);
+			DuctworkMetadata::SetDouble(placed, "MDUX_OriginalHeight", originalHeight);
+		}
 		double originalRotation = 0.0;
 		if (!DuctworkMetadata::GetDouble(placed, "MDUX_OriginalRotation", originalRotation)) {
 			DuctworkMetadata::SetDouble(placed, "MDUX_OriginalRotation", normalized);
 		}
-		return noteOk;
+		double originalStroke = 0.0;
+		if (!DuctworkMetadata::GetDouble(placed, "MDUX_OriginalStrokeWidth", originalStroke)) {
+			DuctworkMetadata::SetDouble(placed, "MDUX_OriginalStrokeWidth", 1.0);
+		}
+		return true;
 	}
 
-	void SetPlacedMetadataForArtAndChild(AIArtHandle placed, double rotation)
+	void SetPlacedMetadataForArtAndChild(AIArtHandle placed, double rotation, double currentScalePercent)
 	{
 		if (!placed) {
 			return;
 		}
-		SetPlacedMetadata(placed, rotation);
+		double originalWidth = 0.0;
+		double originalHeight = 0.0;
+		GetPlacedNaturalSize(placed, originalWidth, originalHeight);
+		SetPlacedMetadata(placed, rotation, currentScalePercent, originalWidth, originalHeight);
 		if (sAIPlaced) {
 			AIArtHandle placedChild = nullptr;
 			if (sAIPlaced->GetPlacedChild(placed, &placedChild) == kNoErr && placedChild) {
-				SetPlacedMetadata(placedChild, rotation);
+				SetPlacedMetadata(placedChild, rotation, currentScalePercent, originalWidth, originalHeight);
 			}
 		}
 	}
@@ -754,7 +796,7 @@ namespace
 	ai::UnicodeString artName = ai::UnicodeString::FromUTF8(registerLayerName + " (Linked)");
 	sAIArt->SetArtName(placed, artName);
 	if (!skipPlacedMetadata) {
-		SetPlacedMetadataForArtAndChild(placed, 0.0);
+		SetPlacedMetadataForArtAndChild(placed, 0.0, scale * 100.0);
 	}
 	return placed;
 }
@@ -787,7 +829,8 @@ namespace
 	ai::UnicodeString artName = ai::UnicodeString::FromUTF8(registerLayerName + " (Linked)");
 	sAIArt->SetArtName(duplicate, artName);
 	if (!skipPlacedMetadata) {
-		SetPlacedMetadataForArtAndChild(duplicate, rotation);
+		const double duplicateScale = DuctworkMetadata::ReadScaleOrDefault(duplicate, 100.0);
+		SetPlacedMetadataForArtAndChild(duplicate, rotation, duplicateScale);
 	}
 	return true;
 }
@@ -862,7 +905,7 @@ namespace
 		ai::UnicodeString artName = ai::UnicodeString::FromUTF8(registerLayerName + " (Linked)");
 		sAIArt->SetArtName(placed, artName);
 		if (!skipPlacedMetadata) {
-			SetPlacedMetadataForArtAndChild(placed, rotation);
+			SetPlacedMetadataForArtAndChild(placed, rotation, scale * 100.0);
 		}
 		return true;
 	}
@@ -980,9 +1023,12 @@ namespace
 		ai::UnicodeString artName = ai::UnicodeString::FromUTF8(registerLayerName + " (Linked)");
 		sAIArt->SetArtName(placed, artName);
 		if (!skipPlacedMetadata) {
-			SetPlacedMetadataForArtAndChild(placed, rotation);
+			SetPlacedMetadataForArtAndChild(placed, rotation, scale * 100.0);
 			if (placedGroup) {
-				SetPlacedMetadata(placedGroup, rotation);
+				double originalWidth = 0.0;
+				double originalHeight = 0.0;
+				GetPlacedNaturalSize(placed, originalWidth, originalHeight);
+				SetPlacedMetadata(placedGroup, rotation, scale * 100.0, originalWidth, originalHeight);
 			}
 		}
 		return true;

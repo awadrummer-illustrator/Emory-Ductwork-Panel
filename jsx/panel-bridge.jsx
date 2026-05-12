@@ -973,8 +973,7 @@ function MDUX_resetTransforms(targetPercent) {
                         item.resize(scaleX, scaleY, true, true, true, true, 100, Transformation.CENTER);
                     }
 
-                    MDUX_removeTag(item, "MDUX_OriginalWidth");
-                    MDUX_removeTag(item, "MDUX_OriginalHeight");
+                    MDUX_setTag(item, "MDUX_CurrentScale", "100");
                 }
             }
 
@@ -986,7 +985,6 @@ function MDUX_resetTransforms(targetPercent) {
                     try {
                         item.strokeWidth = parseFloat(origStroke);
                     } catch (e) {}
-                    MDUX_removeTag(item, "MDUX_OriginalStrokeWidth");
                 }
             } else if (isDuctLine) {
                 // For ductwork lines: reapply the default graphic style based on layer
@@ -1003,7 +1001,7 @@ function MDUX_resetTransforms(targetPercent) {
             }
 
             // 4. Restore Selection Transform Tag
-            MDUX_removeTag(item, "MDUX_CurrentScale");
+            MDUX_setTag(item, "MDUX_CurrentScale", "100");
 
             count++;
         }
@@ -3188,6 +3186,8 @@ function MDUX_moveToLayerBridge(optionsJSON) {
                             var newBounds = newItem.geometricBounds;
                             var newWidth = Math.abs(newBounds[2] - newBounds[0]);
                             var newHeight = Math.abs(newBounds[1] - newBounds[3]);
+                            var originalWidth = newWidth;
+                            var originalHeight = newHeight;
 
                             // Scale FIRST if needed
                             if (smallestScale !== 100) {
@@ -3254,9 +3254,10 @@ function MDUX_moveToLayerBridge(optionsJSON) {
                                 var finalScale = oldStoredScale || smallestScale;
 
                                 var metadata = {
-                                    MDUX_OriginalWidth: actualWidth,
-                                    MDUX_OriginalHeight: actualHeight,
+                                    MDUX_OriginalWidth: originalWidth,
+                                    MDUX_OriginalHeight: originalHeight,
                                     MDUX_OriginalStrokeWidth: actualStrokeWidth,
+                                    MDUX_OriginalScale: "100",
                                     MDUX_OriginalRotation: String(finalRotation),
                                     MDUX_CumulativeRotation: String(finalRotation),
                                     MDUX_CurrentScale: String(finalScale),
@@ -3270,7 +3271,7 @@ function MDUX_moveToLayerBridge(optionsJSON) {
                                 }
 
                                 MDUX_setMetadata(newItem, metadata);
-                                $.writeln("[MOVE]   Wrote complete metadata: scale=" + finalScale + ", rotation=" + finalRotation + (rotationOverride !== null ? ", rotOverride=" + rotationOverride : "") + ", width=" + actualWidth);
+                                $.writeln("[MOVE]   Wrote complete metadata: scale=" + finalScale + ", rotation=" + finalRotation + (rotationOverride !== null ? ", rotOverride=" + rotationOverride : "") + ", original width=" + originalWidth);
                             } catch (eMetadata) {
                                 $.writeln("[MOVE]   Warning: Failed to write metadata: " + eMetadata);
                             }
@@ -3584,6 +3585,8 @@ function MDUX_moveToLayerBridge(optionsJSON) {
                                 var newBounds = newItem.geometricBounds;
                                 var newWidth = Math.abs(newBounds[2] - newBounds[0]);
                                 var newHeight = Math.abs(newBounds[1] - newBounds[3]);
+                                var originalWidth = newWidth;
+                                var originalHeight = newHeight;
 
                                 // Scale using preserved scale from old art, or smallest on layer
                                 var useScale = nearestArtScale;
@@ -3622,9 +3625,10 @@ function MDUX_moveToLayerBridge(optionsJSON) {
                                 // Write metadata
                                 try {
                                     var metadata = {
-                                        MDUX_OriginalWidth: newItem.width,
-                                        MDUX_OriginalHeight: newItem.height,
+                                        MDUX_OriginalWidth: originalWidth,
+                                        MDUX_OriginalHeight: originalHeight,
                                         MDUX_OriginalStrokeWidth: 1,
+                                        MDUX_OriginalScale: "100",
                                         MDUX_OriginalRotation: String(nearestArtRotation),
                                         MDUX_CumulativeRotation: String(nearestArtRotation),
                                         MDUX_CurrentScale: String(useScale),
@@ -4010,6 +4014,19 @@ function MDUX_transformEach(scale, rotation, undoPrevious) {
         var transformedCount = 0;
         var errors = 0;
 
+        function getMatrixScalePercent(item) {
+            try {
+                if (!item || !item.matrix) return null;
+                var m = item.matrix;
+                var scaleX = Math.sqrt(m.mValueA * m.mValueA + m.mValueB * m.mValueB);
+                var scaleY = Math.sqrt(m.mValueC * m.mValueC + m.mValueD * m.mValueD);
+                var scale = ((scaleX + scaleY) / 2) * 100;
+                return isFinite(scale) && scale > 0 ? scale : null;
+            } catch (eScale) {
+                return null;
+            }
+        }
+
         for (var i = 0; i < len; i++) {
             var item = sel[i];
             try {
@@ -4023,12 +4040,15 @@ function MDUX_transformEach(scale, rotation, undoPrevious) {
                 if (meta.MDUX_OriginalWidth === undefined) {
                     var sWidth = 1;
                     try { sWidth = item.strokeWidth || 1; } catch (e) { }
-                    meta.MDUX_OriginalWidth = item.width;
-                    meta.MDUX_OriginalHeight = item.height;
+                    var matrixScalePercent = getMatrixScalePercent(item) || 100;
+                    var matrixScaleFactor = matrixScalePercent / 100;
+                    meta.MDUX_OriginalWidth = item.width / matrixScaleFactor;
+                    meta.MDUX_OriginalHeight = item.height / matrixScaleFactor;
                     meta.MDUX_OriginalStrokeWidth = sWidth;
+                    meta.MDUX_OriginalScale = "100";
                     meta.MDUX_OriginalRotation = "0";
                     meta.MDUX_CumulativeRotation = "0";
-                    meta.MDUX_CurrentScale = "100";
+                    meta.MDUX_CurrentScale = String(matrixScalePercent);
                     meta.MDUX_RotationOverride = 0;
                 }
 
@@ -4082,6 +4102,17 @@ function MDUX_transformEach(scale, rotation, undoPrevious) {
                 // --- SCALING (ABSOLUTE) ---
                 if (Math.abs(currentScale - targetPercent) > 0.001) {
                     var resizeFactor = (targetPercent / currentScale) * 100;
+                    if (isDuctPart && meta.MDUX_OriginalWidth !== undefined && meta.MDUX_OriginalHeight !== undefined) {
+                        var originalW = parseFloat(meta.MDUX_OriginalWidth);
+                        var originalH = parseFloat(meta.MDUX_OriginalHeight);
+                        var targetW = originalW * (targetPercent / 100);
+                        var targetH = originalH * (targetPercent / 100);
+                        var factorX = item.width > 0 ? (targetW / item.width) * 100 : resizeFactor;
+                        var factorY = item.height > 0 ? (targetH / item.height) * 100 : resizeFactor;
+                        if (isFinite(factorX) && isFinite(factorY) && factorX > 0 && factorY > 0) {
+                            resizeFactor = (factorX + factorY) / 2;
+                        }
+                    }
 
                     if (isDuctLine) {
                         // Lines: scale stroke only
@@ -4457,6 +4488,8 @@ function MDUX_placeArtAtTargetAnchors(anchors) {
                 var newBounds = newItem.geometricBounds;
                 var newWidth = Math.abs(newBounds[2] - newBounds[0]);
                 var newHeight = Math.abs(newBounds[1] - newBounds[3]);
+                var originalWidth = newWidth;
+                var originalHeight = newHeight;
 
                 if (scale !== 100) {
                     newItem.resize(scale, scale, true, false, false, false, 100, Transformation.CENTER);
@@ -4471,9 +4504,10 @@ function MDUX_placeArtAtTargetAnchors(anchors) {
                 // Write metadata
                 try {
                     var metadata = {
-                        MDUX_OriginalWidth: newItem.width,
-                        MDUX_OriginalHeight: newItem.height,
+                        MDUX_OriginalWidth: originalWidth,
+                        MDUX_OriginalHeight: originalHeight,
                         MDUX_OriginalStrokeWidth: 1,
+                        MDUX_OriginalScale: "100",
                         MDUX_OriginalRotation: "0",
                         MDUX_CumulativeRotation: "0",
                         MDUX_CurrentScale: String(scale),

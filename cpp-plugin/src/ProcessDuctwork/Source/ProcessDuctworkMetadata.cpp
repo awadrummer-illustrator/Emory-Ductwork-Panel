@@ -81,8 +81,10 @@ namespace
 		}
 		const char* keys[] = {
 			"MDUX_CurrentScale",
+			"MDUX_OriginalScale",
 			"MDUX_CumulativeRotation",
 			"MDUX_RotationOverride",
+			"MDUX_OriginalRotation",
 			"MDUX_OriginalWidth",
 			"MDUX_OriginalHeight",
 			"MDUX_OriginalStrokeWidth",

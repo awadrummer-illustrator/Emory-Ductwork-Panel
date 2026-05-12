@@ -605,25 +605,191 @@ namespace
 		}
 	}
 
+	double RectWidth(const AIRealRect& rect)
+	{
+		return std::fabs(static_cast<double>(rect.right) - static_cast<double>(rect.left));
+	}
+
+	double RectHeight(const AIRealRect& rect)
+	{
+		return std::fabs(static_cast<double>(rect.top) - static_cast<double>(rect.bottom));
+	}
+
+	bool IsPositiveFinite(double value)
+	{
+		return std::isfinite(value) && value > 0.001;
+	}
+
+	bool GetArtSize(AIArtHandle art, double& outWidth, double& outHeight)
+	{
+		outWidth = 0.0;
+		outHeight = 0.0;
+		if (!art || !sAIArt) {
+			return false;
+		}
+		AIRealRect bounds;
+		AIErr err = sAIArt->GetArtBounds(art, &bounds);
+		if (err != kNoErr) {
+			err = sAIArt->GetArtTransformBounds(art, nullptr, kVisibleBounds | kExcludeGuideBounds, &bounds);
+			if (err != kNoErr) {
+				return false;
+			}
+		}
+		outWidth = RectWidth(bounds);
+		outHeight = RectHeight(bounds);
+		return IsPositiveFinite(outWidth) && IsPositiveFinite(outHeight);
+	}
+
+	bool GetPlacedOriginalSize(AIArtHandle art, double& outWidth, double& outHeight)
+	{
+		outWidth = 0.0;
+		outHeight = 0.0;
+		AIArtHandle placed = ResolvePlacedAncestor(art);
+		if (!placed || !sAIPlaced) {
+			return false;
+		}
+
+		AIRealPoint size{};
+		AIRealRect viewBounds{};
+		AIRealMatrix viewMatrix{};
+		AIRealRect imageBounds{};
+		AIRealMatrix imageMatrix{};
+		if (sAIPlaced->GetPlacedDimensions(placed, &size, &viewBounds, &viewMatrix, &imageBounds, &imageMatrix) == kNoErr) {
+			outWidth = std::fabs(static_cast<double>(size.h));
+			outHeight = std::fabs(static_cast<double>(size.v));
+			if (IsPositiveFinite(outWidth) && IsPositiveFinite(outHeight)) {
+				return true;
+			}
+		}
+
+		AIRealRect placedBounds{};
+		if (sAIPlaced->GetPlacedBoundingBox(placed, &placedBounds) == kNoErr) {
+			outWidth = RectWidth(placedBounds);
+			outHeight = RectHeight(placedBounds);
+			if (IsPositiveFinite(outWidth) && IsPositiveFinite(outHeight)) {
+				return true;
+			}
+		}
+		return false;
+	}
+
+	bool GetPlacedScalePercent(AIArtHandle art, double& outScalePercent)
+	{
+		outScalePercent = 0.0;
+		AIArtHandle placed = ResolvePlacedAncestor(art);
+		if (!placed || !sAIPlaced) {
+			return false;
+		}
+
+		AIRealMatrix matrix{};
+		if (sAIPlaced->GetPlacedMatrix(placed, &matrix) != kNoErr) {
+			return false;
+		}
+		const double scaleX = std::hypot(static_cast<double>(matrix.a), static_cast<double>(matrix.b));
+		const double scaleY = std::hypot(static_cast<double>(matrix.c), static_cast<double>(matrix.d));
+		double scale = 0.0;
+		if (IsPositiveFinite(scaleX) && IsPositiveFinite(scaleY)) {
+			scale = (scaleX + scaleY) * 0.5;
+		} else if (IsPositiveFinite(scaleX)) {
+			scale = scaleX;
+		} else if (IsPositiveFinite(scaleY)) {
+			scale = scaleY;
+		}
+		if (!IsPositiveFinite(scale)) {
+			return false;
+		}
+		outScalePercent = scale * 100.0;
+		return true;
+	}
+
+	bool ResolveOriginalSize(AIArtHandle art, double currentScale, double& outOriginalWidth, double& outOriginalHeight)
+	{
+		if (GetPlacedOriginalSize(art, outOriginalWidth, outOriginalHeight)) {
+			return true;
+		}
+
+		double storedWidth = 0.0;
+		double storedHeight = 0.0;
+		if (DuctworkMetadata::GetDouble(art, "MDUX_OriginalWidth", storedWidth) &&
+			DuctworkMetadata::GetDouble(art, "MDUX_OriginalHeight", storedHeight) &&
+			IsPositiveFinite(storedWidth) &&
+			IsPositiveFinite(storedHeight)) {
+			outOriginalWidth = storedWidth;
+			outOriginalHeight = storedHeight;
+			return true;
+		}
+
+		double currentWidth = 0.0;
+		double currentHeight = 0.0;
+		if (!GetArtSize(art, currentWidth, currentHeight)) {
+			return false;
+		}
+		const double currentScaleFactor = IsPositiveFinite(currentScale) ? (currentScale / 100.0) : 1.0;
+		outOriginalWidth = currentWidth / currentScaleFactor;
+		outOriginalHeight = currentHeight / currentScaleFactor;
+		return IsPositiveFinite(outOriginalWidth) && IsPositiveFinite(outOriginalHeight);
+	}
+
 	void EnsureOriginalTransform(AIArtHandle art, double currentScale, double currentRotation)
 	{
 		double originalScale = 0.0;
 		if (!DuctworkMetadata::GetDouble(art, "MDUX_OriginalScale", originalScale)) {
-			DuctworkMetadata::SetDouble(art, "MDUX_OriginalScale", currentScale);
+			DuctworkMetadata::SetDouble(art, "MDUX_OriginalScale", 100.0);
 		}
 		double originalRotation = 0.0;
 		if (!DuctworkMetadata::GetDouble(art, "MDUX_OriginalRotation", originalRotation)) {
 			DuctworkMetadata::SetDouble(art, "MDUX_OriginalRotation", currentRotation);
 		}
+		double originalWidth = 0.0;
+		double originalHeight = 0.0;
+		if (ResolveOriginalSize(art, currentScale, originalWidth, originalHeight)) {
+			DuctworkMetadata::SetDouble(art, "MDUX_OriginalWidth", originalWidth);
+			DuctworkMetadata::SetDouble(art, "MDUX_OriginalHeight", originalHeight);
+		}
 	}
 
-	double ReadOriginalScale(AIArtHandle art, double fallback)
+	bool ResolveAbsoluteScaleFactor(AIArtHandle art, double targetScale, double currentScale, double& outScaleFactor)
 	{
-		double value = 0.0;
-		if (DuctworkMetadata::GetDouble(art, "MDUX_OriginalScale", value)) {
-			return value;
+		outScaleFactor = 1.0;
+		if (!IsPositiveFinite(targetScale)) {
+			return false;
 		}
-		return fallback;
+
+		double placedScale = 0.0;
+		if (GetPlacedScalePercent(art, placedScale) && IsPositiveFinite(placedScale)) {
+			outScaleFactor = targetScale / placedScale;
+			return IsPositiveFinite(outScaleFactor);
+		}
+
+		double originalWidth = 0.0;
+		double originalHeight = 0.0;
+		double currentWidth = 0.0;
+		double currentHeight = 0.0;
+		if (ResolveOriginalSize(art, currentScale, originalWidth, originalHeight) &&
+			GetArtSize(art, currentWidth, currentHeight)) {
+			const double targetWidth = originalWidth * (targetScale / 100.0);
+			const double targetHeight = originalHeight * (targetScale / 100.0);
+			const double scaleX = IsPositiveFinite(currentWidth) ? (targetWidth / currentWidth) : 0.0;
+			const double scaleY = IsPositiveFinite(currentHeight) ? (targetHeight / currentHeight) : 0.0;
+			if (IsPositiveFinite(scaleX) && IsPositiveFinite(scaleY)) {
+				outScaleFactor = (scaleX + scaleY) * 0.5;
+				return IsPositiveFinite(outScaleFactor);
+			}
+			if (IsPositiveFinite(scaleX)) {
+				outScaleFactor = scaleX;
+				return true;
+			}
+			if (IsPositiveFinite(scaleY)) {
+				outScaleFactor = scaleY;
+				return true;
+			}
+		}
+
+		if (IsPositiveFinite(currentScale)) {
+			outScaleFactor = targetScale / currentScale;
+			return IsPositiveFinite(outScaleFactor);
+		}
+		return false;
 	}
 
 	double ReadOriginalRotation(AIArtHandle art, double fallback)
@@ -867,6 +1033,21 @@ void EmoryDuctworkPanel::UpdateSelectionSummary()
 
 	std::vector<AIArtHandle> scaleTargets = partItems;
 	scaleTargets.insert(scaleTargets.end(), linePaths.begin(), linePaths.end());
+	for (size_t i = 0; i < partItems.size(); ++i) {
+		AIArtHandle art = partItems[i];
+		double currentScale = DuctworkMetadata::ReadScaleOrDefault(art, 100.0);
+		double placedScale = 0.0;
+		if (GetPlacedScalePercent(art, placedScale)) {
+			currentScale = placedScale;
+			double storedScale = 0.0;
+			if (!DuctworkMetadata::GetDouble(art, "MDUX_CurrentScale", storedScale) ||
+				std::fabs(storedScale - placedScale) > 0.1) {
+				DuctworkMetadata::SetDouble(art, "MDUX_CurrentScale", placedScale);
+			}
+		}
+		const double currentRotation = DuctworkMetadata::ReadRotationOrDefault(art, 0.0);
+		EnsureOriginalTransform(art, currentScale, currentRotation);
+	}
 
 	DuctworkMetadata::TransformSummary scaleSummary = DuctworkMetadata::SummarizeSelectionTransform(scaleTargets);
 	DuctworkMetadata::TransformSummary rotationSummary = DuctworkMetadata::SummarizeSelectionTransform(rotatableParts);
@@ -1327,6 +1508,23 @@ bool EmoryDuctworkPanel::ApplyTransformSelection(double targetScale, double targ
 	}
 	linePaths.swap(regularLinePaths);
 
+	{
+		std::set<AIArtHandle> partSet;
+		std::vector<AIArtHandle> resolvedParts;
+		resolvedParts.reserve(partItems.size());
+		for (size_t i = 0; i < partItems.size(); ++i) {
+			AIArtHandle art = partItems[i];
+			AIArtHandle placed = ResolvePlacedAncestor(art);
+			if (placed) {
+				art = placed;
+			}
+			if (art && partSet.insert(art).second) {
+				resolvedParts.push_back(art);
+			}
+		}
+		partItems.swap(resolvedParts);
+	}
+
 	DuctworkLog::Write("Panel ApplyTransform: linePaths=" + std::to_string(static_cast<int>(linePaths.size())) +
 		" emoryLinePaths=" + std::to_string(static_cast<int>(emoryLinePaths.size())) +
 		" partItems=" + std::to_string(static_cast<int>(partItems.size())) +
@@ -1355,7 +1553,11 @@ bool EmoryDuctworkPanel::ApplyTransformSelection(double targetScale, double targ
 		const double currentScale = DuctworkMetadata::ReadScaleOrDefault(art, 100.0);
 		const double currentRotation = DuctworkMetadata::ReadRotationOrDefault(art, 0.0);
 		EnsureOriginalTransform(art, currentScale, currentRotation);
-		const double scaleFactor = applyScale ? ((currentScale == 0.0) ? 1.0 : (targetScale / currentScale)) : 1.0;
+		double scaleFactor = 1.0;
+		if (applyScale && !ResolveAbsoluteScaleFactor(art, targetScale, currentScale, scaleFactor)) {
+			DuctworkLog::Write("Panel ApplyTransform: unable to resolve original-size scale factor");
+			continue;
+		}
 		const bool canRotate = IsRotatablePartArt(art);
 		const double rotationDelta = (canRotate && applyRotation) ? (targetRotation - currentRotation) : 0.0;
 		if (std::fabs(scaleFactor - 1.0) < 0.0001 && std::fabs(rotationDelta) < 0.0001) {
@@ -1369,9 +1571,12 @@ bool EmoryDuctworkPanel::ApplyTransformSelection(double targetScale, double targ
 		const bool trackPlacedRotation = (artType == kPlacedArt && applyScale && !applyRotation &&
 			GetPlacedRotationDegrees(art, beforePlacedRotation));
 		if (artType == kPlacedArt) {
+			double placedScale = 0.0;
+			GetPlacedScalePercent(art, placedScale);
 			DuctworkLog::Write("Panel Part: scaleFactor=" + std::to_string(scaleFactor) +
 				" rotationDelta=" + std::to_string(rotationDelta) +
 				" metaScale=" + std::to_string(currentScale) +
+				" placedScale=" + std::to_string(placedScale) +
 				" metaRotation=" + std::to_string(currentRotation) +
 				" placedRotationBefore=" + std::to_string(beforePlacedRotation));
 		}
@@ -1486,13 +1691,14 @@ void EmoryDuctworkPanel::ResetTransformToOriginal()
 		}
 		const double currentScale = DuctworkMetadata::ReadScaleOrDefault(art, 100.0);
 		const double currentRotation = DuctworkMetadata::ReadRotationOrDefault(art, 0.0);
-		const double originalScale = ReadOriginalScale(art, 100.0);
+		EnsureOriginalTransform(art, currentScale, currentRotation);
 		const double originalRotation = ReadOriginalRotation(art, 0.0);
-		const double scaleFactor = (currentScale == 0.0) ? 1.0 : (originalScale / currentScale);
+		double scaleFactor = 1.0;
+		ResolveAbsoluteScaleFactor(art, 100.0, currentScale, scaleFactor);
 		const bool canRotate = IsRotatablePartArt(art);
 		const double rotationDelta = canRotate ? (originalRotation - currentRotation) : 0.0;
 		ApplyTransform(art, rotationDelta, scaleFactor);
-		DuctworkMetadata::SetDouble(art, "MDUX_CurrentScale", originalScale);
+		DuctworkMetadata::SetDouble(art, "MDUX_CurrentScale", 100.0);
 		if (canRotate) {
 			DuctworkMetadata::SetDouble(art, "MDUX_CumulativeRotation", originalRotation);
 			DuctworkMetadata::SetDouble(art, "MDUX_RotationOverride", originalRotation);
@@ -1556,10 +1762,12 @@ void EmoryDuctworkPanel::ResetScale()
 			continue;
 		}
 		const double currentScale = DuctworkMetadata::ReadScaleOrDefault(art, 100.0);
-		const double originalScale = ReadOriginalScale(art, 100.0);
-		const double scaleFactor = (currentScale == 0.0) ? 1.0 : (originalScale / currentScale);
+		const double currentRotation = DuctworkMetadata::ReadRotationOrDefault(art, 0.0);
+		EnsureOriginalTransform(art, currentScale, currentRotation);
+		double scaleFactor = 1.0;
+		ResolveAbsoluteScaleFactor(art, 100.0, currentScale, scaleFactor);
 		ApplyTransform(art, 0.0, scaleFactor);
-		DuctworkMetadata::SetDouble(art, "MDUX_CurrentScale", originalScale);
+		DuctworkMetadata::SetDouble(art, "MDUX_CurrentScale", 100.0);
 	}
 	SetScaleValue(100.0);
 	SetStatusText(L"Scale reset.");
