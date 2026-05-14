@@ -1933,6 +1933,26 @@ ASErr ProcessDuctworkPlugin::Message(char* caller, char* selector, void* message
 					return kNoErr;
 				}
 
+				if (action == "set-emory-cascade-stop-segment") {
+					std::string messageText;
+					const bool ok = DuctworkGeometry::SetSelectedEmoryCascadeStopSegment(true, messageText);
+					std::ostringstream out;
+					out << "{\"ok\":" << (ok ? "true" : "false")
+						<< ",\"message\":\"" << messageText << "\"}";
+					msg->outParam = ai::UnicodeString::FromUTF8(out.str());
+					return kNoErr;
+				}
+
+				if (action == "clear-emory-cascade-stop-segment") {
+					std::string messageText;
+					const bool ok = DuctworkGeometry::SetSelectedEmoryCascadeStopSegment(false, messageText);
+					std::ostringstream out;
+					out << "{\"ok\":" << (ok ? "true" : "false")
+						<< ",\"message\":\"" << messageText << "\"}";
+					msg->outParam = ai::UnicodeString::FromUTF8(out.str());
+					return kNoErr;
+				}
+
 				if (action == "apply-emory-segment-width") {
 					const double width = ParseDouble(data, "width", 0.0);
 					std::string messageText;

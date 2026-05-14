@@ -1112,7 +1112,11 @@ namespace
 			path.art = art[i];
 			path.closed = closed;
 			path.layerName = DuctworkGeometry::GetArtLayerName(art[i]);
-			if (!DuctworkGeometry::IsCenterlineCandidate(path.art, path.points, path.closed, path.layerName)) {
+			if (path.closed || path.points.size() < 2) {
+				continue;
+			}
+			if (layerName != "Thermostat Lines" &&
+				!DuctworkGeometry::IsCenterlineCandidate(path.art, path.points, path.closed, path.layerName)) {
 				continue;
 			}
 
@@ -1152,7 +1156,11 @@ namespace
 			path.art = art[i];
 			path.closed = closed;
 			path.layerName = DuctworkGeometry::GetArtLayerName(art[i]);
-			if (!DuctworkGeometry::IsCenterlineCandidate(path.art, path.points, path.closed, path.layerName)) {
+			if (path.closed || path.points.size() < 2) {
+				continue;
+			}
+			if (layerName != "Thermostat Lines" &&
+				!DuctworkGeometry::IsCenterlineCandidate(path.art, path.points, path.closed, path.layerName)) {
 				continue;
 			}
 			outPaths.push_back(path);

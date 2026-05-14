@@ -71,6 +71,7 @@ namespace
 	const char* const kEmoryOmitStartSegmentThicknessKey = "MDUX_EmoryOmitStartSegmentThickness";
 	const char* const kEmoryOmitEndSegmentThicknessKey = "MDUX_EmoryOmitEndSegmentThickness";
 	const char* const kEmoryOmittedSegmentIndicesKey = "MDUX_EmoryOmittedSegmentIndices";
+	const char* const kEmoryCascadeStopSegmentsKey = "MDUX_EmoryCascadeStopSegments";
 	const char* const kEmorySegmentIndexKey = "MDUX_EmorySegmentIndex";
 	const char* const kEmoryJointIndexKey = "MDUX_EmoryJointIndex";
 	const char* const kEmoryConnectorStyleKey = "MDUX_EmoryConnectorStyle";
@@ -221,10 +222,26 @@ namespace
 		std::vector<double> widths;
 		std::vector<StraightChainInfo> straightChains;
 		std::vector<int> straightChainIndexBySegment;
+		std::set<size_t> cascadeStopSegments;
 		bool hasStoredSegmentWidths = false;
 		bool touched = false;
 		bool selectedSeed = false;
 	};
+
+	bool IsCascadeStopSegment(const EmorySourceState& state, int segmentIndex)
+	{
+		return segmentIndex >= 0 &&
+			state.cascadeStopSegments.find(static_cast<size_t>(segmentIndex)) != state.cascadeStopSegments.end();
+	}
+
+	bool CascadeConnectionBlocked(const EmorySourceState& sourceState,
+		int sourceSegmentIndex,
+		const EmorySourceState& targetState,
+		int targetSegmentIndex)
+	{
+		return IsCascadeStopSegment(sourceState, sourceSegmentIndex) ||
+			IsCascadeStopSegment(targetState, targetSegmentIndex);
+	}
 
 	void MarkWidthApplyProtectedSources(std::vector<EmorySourceState>& states)
 	{
@@ -2596,6 +2613,7 @@ namespace
 		DuctworkMetadata::RemoveKey(art, kEmoryOmitStartSegmentThicknessKey);
 		DuctworkMetadata::RemoveKey(art, kEmoryOmitEndSegmentThicknessKey);
 		DuctworkMetadata::RemoveKey(art, kEmoryOmittedSegmentIndicesKey);
+		DuctworkMetadata::RemoveKey(art, kEmoryCascadeStopSegmentsKey);
 		DuctworkMetadata::RemoveKey(art, kEmorySegmentIndexKey);
 		DuctworkMetadata::RemoveKey(art, kEmoryJointIndexKey);
 		DuctworkMetadata::RemoveKey(art, kEmoryConnectorStyleKey);
@@ -4753,6 +4771,43 @@ namespace
 		DuctworkMetadata::SetString(art, kEmoryOmittedSegmentIndicesKey, SerializeSegmentIndexSet(indices));
 	}
 
+	void ReadCascadeStopSegments(AIArtHandle art, size_t segmentCount, std::set<size_t>& outIndices)
+	{
+		outIndices.clear();
+		if (!art || segmentCount == 0) {
+			return;
+		}
+
+		std::string serialized;
+		if (!DuctworkMetadata::GetString(art, kEmoryCascadeStopSegmentsKey, serialized) || serialized.empty()) {
+			return;
+		}
+
+		std::stringstream ss(serialized);
+		std::string token;
+		while (std::getline(ss, token, ',')) {
+			if (token.empty()) {
+				continue;
+			}
+			const int value = std::atoi(token.c_str());
+			if (value >= 0 && value < static_cast<int>(segmentCount)) {
+				outIndices.insert(static_cast<size_t>(value));
+			}
+		}
+	}
+
+	void WriteCascadeStopSegments(AIArtHandle art, const std::set<size_t>& indices)
+	{
+		if (!art) {
+			return;
+		}
+		if (indices.empty()) {
+			DuctworkMetadata::RemoveKey(art, kEmoryCascadeStopSegmentsKey);
+			return;
+		}
+		DuctworkMetadata::SetString(art, kEmoryCascadeStopSegmentsKey, SerializeSegmentIndexSet(indices));
+	}
+
 	int ReadStartSegmentIndex(AIArtHandle sourceArt, size_t segmentCount)
 	{
 		if (!sourceArt || segmentCount == 0) {
@@ -4972,6 +5027,21 @@ void ClearStartSegmentIndex(AIArtHandle sourceArt)
 	}
 	WriteOmittedSegmentIndices(firstArt, firstOmitted);
 	WriteOmittedSegmentIndices(secondArt, secondOmitted);
+
+	std::set<size_t> cascadeStopIndices;
+	ReadCascadeStopSegments(sourceArt, segmentCount, cascadeStopIndices);
+	std::set<size_t> firstCascadeStops;
+	std::set<size_t> secondCascadeStops;
+	for (std::set<size_t>::const_iterator it = cascadeStopIndices.begin(); it != cascadeStopIndices.end(); ++it) {
+		if (*it <= splitSegmentIndex) {
+			firstCascadeStops.insert(*it);
+		}
+		if (*it >= splitSegmentIndex) {
+			secondCascadeStops.insert(*it - splitSegmentIndex);
+		}
+	}
+	WriteCascadeStopSegments(firstArt, firstCascadeStops);
+	WriteCascadeStopSegments(secondArt, secondCascadeStops);
 }
 
 	double DistancePointToSegment(const DuctworkPoint& point, const DuctworkPoint& start, const DuctworkPoint& end)
@@ -5112,6 +5182,8 @@ void ClearStartSegmentIndex(AIArtHandle sourceArt)
 			const int backupStartIndex = ReadStartSegmentIndex(backupArt, backupSegmentCount);
 			const bool omitStart = ReadFinalSegmentThicknessFlag(backupArt, kEmoryOmitStartSegmentThicknessKey);
 			const bool omitEnd = ReadFinalSegmentThicknessFlag(backupArt, kEmoryOmitEndSegmentThicknessKey);
+			std::set<size_t> backupCascadeStopSegments;
+			ReadCascadeStopSegments(backupArt, backupSegmentCount, backupCascadeStopSegments);
 
 			for (size_t i = 0; i < allPaths.size(); ++i) {
 				AIArtHandle art = allPaths[i];
@@ -5166,6 +5238,15 @@ void ClearStartSegmentIndex(AIArtHandle sourceArt)
 				}
 
 				WriteSegmentWidths(art, fragmentWidths);
+				std::set<size_t> fragmentCascadeStops;
+				for (size_t index = 0; index < backupIndices.size(); ++index) {
+					const int backupIndex = backupIndices[index];
+					if (backupIndex >= 0 &&
+						backupCascadeStopSegments.find(static_cast<size_t>(backupIndex)) != backupCascadeStopSegments.end()) {
+						fragmentCascadeStops.insert(index);
+					}
+				}
+				WriteCascadeStopSegments(art, fragmentCascadeStops);
 
 				int localStartIndex = 0;
 				if (!backupIndices.empty()) {
@@ -6385,9 +6466,16 @@ void ClearStartSegmentIndex(AIArtHandle sourceArt)
 		return selectedSegmentIndex < clampedStart ? -1 : 1;
 	}
 
-	void ApplyCascadeFromAnchor(const std::vector<double>& originalWidths, std::vector<double>& widths, int anchorIndex, int direction)
+	void ApplyCascadeFromAnchor(const std::vector<double>& originalWidths,
+		std::vector<double>& widths,
+		int anchorIndex,
+		int direction,
+		const std::set<size_t>* stopSegments = nullptr)
 	{
 		if (direction == 0 || anchorIndex < 0 || anchorIndex >= static_cast<int>(widths.size()) || originalWidths.size() != widths.size()) {
+			return;
+		}
+		if (stopSegments && stopSegments->find(static_cast<size_t>(anchorIndex)) != stopSegments->end()) {
 			return;
 		}
 
@@ -6395,6 +6483,9 @@ void ClearStartSegmentIndex(AIArtHandle sourceArt)
 		for (int currentIndex = anchorIndex + direction;
 			currentIndex >= 0 && currentIndex < static_cast<int>(widths.size());
 			currentIndex += direction) {
+			if (stopSegments && stopSegments->find(static_cast<size_t>(currentIndex)) != stopSegments->end()) {
+				continue;
+			}
 			double ratio = 1.0;
 			if (upstreamIndex >= 0 && upstreamIndex < static_cast<int>(originalWidths.size()) &&
 				currentIndex >= 0 && currentIndex < static_cast<int>(originalWidths.size()) &&
@@ -6513,6 +6604,9 @@ void ClearStartSegmentIndex(AIArtHandle sourceArt)
 			targetState.widths.size() != targetState.originalWidths.size()) {
 			return false;
 		}
+		if (CascadeConnectionBlocked(sourceState, sourceAttachment.segmentIndex, targetState, targetAttachment.segmentIndex)) {
+			return false;
+		}
 
 		double matchedWidth = sourceState.widths[sourceAttachment.segmentIndex];
 		if (!std::isfinite(matchedWidth) || matchedWidth < kMinDuctWidth) {
@@ -6522,7 +6616,7 @@ void ClearStartSegmentIndex(AIArtHandle sourceArt)
 		std::vector<double> updatedWidths = targetState.widths;
 		updatedWidths[targetAttachment.segmentIndex] = matchedWidth;
 		const int direction = (targetAttachment.segmentIndex == 0) ? 1 : -1;
-		ApplyCascadeFromAnchor(targetState.originalWidths, updatedWidths, targetAttachment.segmentIndex, direction);
+		ApplyCascadeFromAnchor(targetState.originalWidths, updatedWidths, targetAttachment.segmentIndex, direction, &targetState.cascadeStopSegments);
 
 		bool changed = targetState.widths.size() != updatedWidths.size();
 		if (!changed) {
@@ -6775,9 +6869,20 @@ void ClearStartSegmentIndex(AIArtHandle sourceArt)
 				}
 				state.startSegmentIndex = localStartIndex;
 				state.hasExplicitStart = hasBackupExplicitStart;
+
+				std::set<size_t> backupCascadeStops;
+				ReadCascadeStopSegments(backupArt, static_cast<size_t>(backupSegmentCount), backupCascadeStops);
+				for (size_t index = 0; index < backupIndices.size(); ++index) {
+					const int backupIndex = backupIndices[index];
+					if (backupIndex >= 0 &&
+						backupCascadeStops.find(static_cast<size_t>(backupIndex)) != backupCascadeStops.end()) {
+						state.cascadeStopSegments.insert(index);
+					}
+				}
 			} else {
 				state.startSegmentIndex = ReadStartSegmentIndex(art, static_cast<size_t>(segmentCount));
 				state.hasExplicitStart = HasExplicitStartSegmentIndex(art);
+				ReadCascadeStopSegments(art, static_cast<size_t>(segmentCount), state.cascadeStopSegments);
 			}
 			ReadDuctRole(art, state.ductRole);
 
@@ -7401,11 +7506,17 @@ void ClearStartSegmentIndex(AIArtHandle sourceArt)
 
 			for (size_t i = 0; i < anchors.size(); ++i) {
 				const int anchorIndex = anchors[i];
+				if (IsCascadeStopSegment(state, anchorIndex)) {
+					continue;
+				}
 				const int stopExclusive = (i + 1 < anchors.size()) ? anchors[i + 1] : (direction < 0 ? -1 : state.segmentCount);
 				int upstreamIndex = anchorIndex;
 				for (int currentIndex = anchorIndex + direction;
 					currentIndex >= 0 && currentIndex < state.segmentCount && currentIndex != stopExclusive;
 					currentIndex += direction) {
+					if (IsCascadeStopSegment(state, currentIndex)) {
+						continue;
+					}
 					double ratio = 1.0;
 					if (state.originalWidths[upstreamIndex] > kPointEpsilon) {
 						ratio = state.originalWidths[currentIndex] / state.originalWidths[upstreamIndex];
@@ -7599,6 +7710,9 @@ void ClearStartSegmentIndex(AIArtHandle sourceArt)
 		if (branchRootSegmentIndex < 0 || branchRootSegmentIndex >= static_cast<int>(branchState.widths.size())) {
 			return false;
 		}
+		if (CascadeConnectionBlocked(upstreamState, upstreamAttachment.segmentIndex, branchState, branchRootSegmentIndex)) {
+			return false;
+		}
 
 		double upstreamOriginalWidth = upstreamState.defaultWidth;
 		if (upstreamAttachment.segmentIndex < static_cast<int>(upstreamState.originalWidths.size()) &&
@@ -7626,7 +7740,7 @@ void ClearStartSegmentIndex(AIArtHandle sourceArt)
 		branchState.widths[branchRootSegmentIndex] = branchRootWidth;
 
 		const int direction = (branchRootSegmentIndex == 0) ? 1 : -1;
-		ApplyCascadeFromAnchor(branchState.originalWidths, branchState.widths, branchRootSegmentIndex, direction);
+		ApplyCascadeFromAnchor(branchState.originalWidths, branchState.widths, branchRootSegmentIndex, direction, &branchState.cascadeStopSegments);
 		branchState.touched = true;
 		return changed;
 	}
@@ -7641,6 +7755,9 @@ void ClearStartSegmentIndex(AIArtHandle sourceArt)
 			branchSegmentIndex < 0 ||
 			branchSegmentIndex >= static_cast<int>(branchState.widths.size()) ||
 			branchState.widths.size() != branchState.originalWidths.size()) {
+			return false;
+		}
+		if (CascadeConnectionBlocked(upstreamState, upstreamSegmentIndex, branchState, branchSegmentIndex)) {
 			return false;
 		}
 
@@ -7668,8 +7785,8 @@ void ClearStartSegmentIndex(AIArtHandle sourceArt)
 
 		const bool changed = !NearlyEqual(branchState.widths[branchSegmentIndex], branchWidth, 0.001);
 		branchState.widths[branchSegmentIndex] = branchWidth;
-		ApplyCascadeFromAnchor(branchState.originalWidths, branchState.widths, branchSegmentIndex, -1);
-		ApplyCascadeFromAnchor(branchState.originalWidths, branchState.widths, branchSegmentIndex, 1);
+		ApplyCascadeFromAnchor(branchState.originalWidths, branchState.widths, branchSegmentIndex, -1, &branchState.cascadeStopSegments);
+		ApplyCascadeFromAnchor(branchState.originalWidths, branchState.widths, branchSegmentIndex, 1, &branchState.cascadeStopSegments);
 		branchState.touched = true;
 		return changed;
 	}
@@ -7691,6 +7808,9 @@ void ClearStartSegmentIndex(AIArtHandle sourceArt)
 		if (branchRootSegmentIndex < 0 || branchRootSegmentIndex >= static_cast<int>(branchState.widths.size())) {
 			return false;
 		}
+		if (CascadeConnectionBlocked(trunkState, trunkAttachment.segmentIndex, branchState, branchRootSegmentIndex)) {
+			return false;
+		}
 
 		double inheritedRootWidth = trunkState.widths[trunkAttachment.segmentIndex] * gBranchInheritedWidthRatio;
 		if (!std::isfinite(inheritedRootWidth) || inheritedRootWidth < kMinDuctWidth) {
@@ -7707,13 +7827,24 @@ void ClearStartSegmentIndex(AIArtHandle sourceArt)
 			inheritedStartSegmentIndex = directionalStartSegmentIndex;
 			persistInheritedStartSegment = false;
 		}
-		std::vector<double> inheritedWidths(branchState.widths.size(), inheritedRootWidth);
-		ApplyDefaultStraightChainTapers(branchState.art,
-			branchState.path.points,
-			inheritedStartSegmentIndex,
-			inheritedWidths);
-		if (branchRootSegmentIndex >= 0 && branchRootSegmentIndex < static_cast<int>(inheritedWidths.size())) {
+		std::vector<double> inheritedWidths;
+		if (!branchState.cascadeStopSegments.empty() &&
+			branchState.widths.size() == branchState.originalWidths.size()) {
+			inheritedWidths = branchState.widths;
 			inheritedWidths[branchRootSegmentIndex] = inheritedRootWidth;
+			const int direction = (branchRootSegmentIndex == 0) ? 1 : -1;
+			ApplyCascadeFromAnchor(branchState.originalWidths, inheritedWidths, branchRootSegmentIndex, direction, &branchState.cascadeStopSegments);
+			inheritedStartSegmentIndex = branchState.startSegmentIndex;
+			persistInheritedStartSegment = branchState.hasExplicitStart;
+		} else {
+			inheritedWidths.assign(branchState.widths.size(), inheritedRootWidth);
+			ApplyDefaultStraightChainTapers(branchState.art,
+				branchState.path.points,
+				inheritedStartSegmentIndex,
+				inheritedWidths);
+			if (branchRootSegmentIndex >= 0 && branchRootSegmentIndex < static_cast<int>(inheritedWidths.size())) {
+				inheritedWidths[branchRootSegmentIndex] = inheritedRootWidth;
+			}
 		}
 
 		bool changed = branchState.startSegmentIndex != inheritedStartSegmentIndex ||
@@ -7973,18 +8104,30 @@ void ClearStartSegmentIndex(AIArtHandle sourceArt)
 			downstreamAttachment.segmentIndex >= static_cast<int>(downstreamState.widths.size())) {
 			return false;
 		}
+		if (CascadeConnectionBlocked(feederState, feederAttachment.segmentIndex, downstreamState, downstreamAttachment.segmentIndex)) {
+			return false;
+		}
 
 		double rootWidth = feederState.widths[feederAttachment.segmentIndex];
 		if (!std::isfinite(rootWidth) || rootWidth < kMinDuctWidth) {
 			rootWidth = kMinDuctWidth;
 		}
 
-		std::vector<double> inheritedWidths(downstreamState.widths.size(), rootWidth);
-		ApplyDefaultStraightChainTapers(downstreamState.art,
-			downstreamState.path.points,
-			downstreamAttachment.segmentIndex,
-			inheritedWidths);
-		inheritedWidths[downstreamAttachment.segmentIndex] = rootWidth;
+		std::vector<double> inheritedWidths;
+		if (!downstreamState.cascadeStopSegments.empty() &&
+			downstreamState.widths.size() == downstreamState.originalWidths.size()) {
+			inheritedWidths = downstreamState.widths;
+			inheritedWidths[downstreamAttachment.segmentIndex] = rootWidth;
+			ApplyCascadeFromAnchor(downstreamState.originalWidths, inheritedWidths, downstreamAttachment.segmentIndex, -1, &downstreamState.cascadeStopSegments);
+			ApplyCascadeFromAnchor(downstreamState.originalWidths, inheritedWidths, downstreamAttachment.segmentIndex, 1, &downstreamState.cascadeStopSegments);
+		} else {
+			inheritedWidths.assign(downstreamState.widths.size(), rootWidth);
+			ApplyDefaultStraightChainTapers(downstreamState.art,
+				downstreamState.path.points,
+				downstreamAttachment.segmentIndex,
+				inheritedWidths);
+			inheritedWidths[downstreamAttachment.segmentIndex] = rootWidth;
+		}
 
 		bool changed = downstreamState.startSegmentIndex != downstreamAttachment.segmentIndex ||
 			!downstreamState.hasExplicitStart ||
@@ -8030,6 +8173,9 @@ void ClearStartSegmentIndex(AIArtHandle sourceArt)
 			branchSegmentIndex >= static_cast<int>(branchState.widths.size())) {
 			return false;
 		}
+		if (CascadeConnectionBlocked(trunkState, trunkSegmentIndex, branchState, branchSegmentIndex)) {
+			return false;
+		}
 
 		double inheritedRootWidth = trunkState.widths[trunkSegmentIndex] * gBranchInheritedWidthRatio;
 		if (!std::isfinite(inheritedRootWidth) || inheritedRootWidth < kMinDuctWidth) {
@@ -8046,13 +8192,24 @@ void ClearStartSegmentIndex(AIArtHandle sourceArt)
 			inheritedStartSegmentIndex = directionalStartSegmentIndex;
 			persistInheritedStartSegment = false;
 		}
-		std::vector<double> inheritedWidths(branchState.widths.size(), inheritedRootWidth);
-		ApplyDefaultStraightChainTapers(branchState.art,
-			branchState.path.points,
-			inheritedStartSegmentIndex,
-			inheritedWidths);
-		if (branchSegmentIndex >= 0 && branchSegmentIndex < static_cast<int>(inheritedWidths.size())) {
+		std::vector<double> inheritedWidths;
+		if (!branchState.cascadeStopSegments.empty() &&
+			branchState.widths.size() == branchState.originalWidths.size()) {
+			inheritedWidths = branchState.widths;
 			inheritedWidths[branchSegmentIndex] = inheritedRootWidth;
+			ApplyCascadeFromAnchor(branchState.originalWidths, inheritedWidths, branchSegmentIndex, -1, &branchState.cascadeStopSegments);
+			ApplyCascadeFromAnchor(branchState.originalWidths, inheritedWidths, branchSegmentIndex, 1, &branchState.cascadeStopSegments);
+			inheritedStartSegmentIndex = branchState.startSegmentIndex;
+			persistInheritedStartSegment = branchState.hasExplicitStart;
+		} else {
+			inheritedWidths.assign(branchState.widths.size(), inheritedRootWidth);
+			ApplyDefaultStraightChainTapers(branchState.art,
+				branchState.path.points,
+				inheritedStartSegmentIndex,
+				inheritedWidths);
+			if (branchSegmentIndex >= 0 && branchSegmentIndex < static_cast<int>(inheritedWidths.size())) {
+				inheritedWidths[branchSegmentIndex] = inheritedRootWidth;
+			}
 		}
 
 		bool changed = branchState.startSegmentIndex != inheritedStartSegmentIndex ||
@@ -8287,6 +8444,9 @@ void ClearStartSegmentIndex(AIArtHandle sourceArt)
 			trunkSegmentIndex >= static_cast<int>(trunkState.widths.size()) ||
 			branchRootSegmentIndex < 0 ||
 			branchRootSegmentIndex >= static_cast<int>(branchState.widths.size())) {
+			return false;
+		}
+		if (CascadeConnectionBlocked(trunkState, trunkSegmentIndex, branchState, branchRootSegmentIndex)) {
 			return false;
 		}
 
@@ -9702,6 +9862,8 @@ bool BuildRoundCornerPolygon(const ConnectorSpec& connector, const CornerPairing
 		std::string omitEndTerminalStyle = ReadTerminalSegmentStyle(path.art, false);
 		std::set<size_t> effectiveOmittedSegments;
 		ReadOmittedSegmentIndices(path.art, effectiveOmittedSegments);
+		std::set<size_t> cascadeStopSegments;
+		ReadCascadeStopSegments(path.art, segmentCount, cascadeStopSegments);
 		const bool hasLocalSegmentOmitMap = !effectiveOmittedSegments.empty();
 		ResolveFragmentOmitThicknessFlagsFromBackup(sourceId, points, omitStartSegmentThickness, omitEndSegmentThickness);
 		ResolveFragmentTerminalStylesFromBackup(sourceId, points, omitStartTerminalStyle, omitEndTerminalStyle);
@@ -9726,6 +9888,7 @@ bool BuildRoundCornerPolygon(const ConnectorSpec& connector, const CornerPairing
 				<< " localMap=" << (hasLocalSegmentOmitMap ? 1 : 0)
 				<< " backupMap=" << (hasBackupSegmentOmitMap ? 1 : 0)
 				<< " omittedSegments=[" << SerializeSegmentIndexSet(effectiveOmittedSegments) << "]"
+				<< " cascadeStops=[" << SerializeSegmentIndexSet(cascadeStopSegments) << "]"
 				<< " widths=[" << SerializeSegmentWidths(segmentWidths) << "]"
 				<< " unitEndpointTaperNormalized=" << (normalizedUnitEndpointTaper ? 1 : 0)
 				<< " sameLayerMarkerCount=" << sameLayerMarkerVertices.size()
@@ -9790,6 +9953,8 @@ bool BuildRoundCornerPolygon(const ConnectorSpec& connector, const CornerPairing
 			const double prevSegmentWidth = segmentWidths[jointIndex - 1];
 			const double nextSegmentWidth = segmentWidths[jointIndex];
 			const double jointBodyWidth = (std::max)(prevSegmentWidth, nextSegmentWidth);
+			const bool prevCascadeStop = cascadeStopSegments.find(prevJointSegmentIndex) != cascadeStopSegments.end();
+			const bool nextCascadeStop = cascadeStopSegments.find(nextJointSegmentIndex) != cascadeStopSegments.end();
 
 			if (isStraightContinuation) {
 				if (std::fabs(prevSegmentWidth - nextSegmentWidth) <= 1e-6) {
@@ -9879,6 +10044,12 @@ bool BuildRoundCornerPolygon(const ConnectorSpec& connector, const CornerPairing
 			if (jointBodyWidth > 0.0) {
 				prevTrimDistance *= prevSegmentWidth / jointBodyWidth;
 				nextTrimDistance *= nextSegmentWidth / jointBodyWidth;
+			}
+			if (prevCascadeStop && !nextCascadeStop && prevSegmentWidth > nextSegmentWidth) {
+				nextTrimDistance = (std::max)(nextTrimDistance, trimDistance);
+			}
+			if (nextCascadeStop && !prevCascadeStop && nextSegmentWidth > prevSegmentWidth) {
+				prevTrimDistance = (std::max)(prevTrimDistance, trimDistance);
 			}
 
 			const double prevMaxAllowed = (prevLength * 0.5) - 0.1;
@@ -10322,6 +10493,12 @@ bool DuctworkGeometry::CopyEmoryCenterlineIdentity(AIArtHandle sourceArt, AIArtH
 		DuctworkMetadata::SetString(targetArt, kEmoryTerminalEndStyleKey, terminalStyle);
 	} else {
 		DuctworkMetadata::RemoveKey(targetArt, kEmoryTerminalEndStyleKey);
+	}
+	std::string cascadeStops;
+	if (DuctworkMetadata::GetString(sourceArt, kEmoryCascadeStopSegmentsKey, cascadeStops) && !cascadeStops.empty()) {
+		DuctworkMetadata::SetString(targetArt, kEmoryCascadeStopSegmentsKey, cascadeStops);
+	} else {
+		DuctworkMetadata::RemoveKey(targetArt, kEmoryCascadeStopSegmentsKey);
 	}
 
 	DuctworkMetadata::SetString(targetArt, kEmorySourceIdKey, sourceId);
@@ -11912,6 +12089,10 @@ bool DuctworkGeometry::GetSelectedEmorySegmentState(std::string& outJson)
 				<< ",\"canApplyWidth\":false"
 				<< ",\"hasExplicitStart\":false"
 				<< ",\"canClearStart\":false"
+				<< ",\"hasCascadeStops\":false"
+				<< ",\"isCascadeStopSegment\":false"
+				<< ",\"canSetCascadeStop\":false"
+				<< ",\"canClearCascadeStop\":false"
 				<< ",\"centerlinesHidden\":false"
 				<< ",\"canToggleTerminalStyle\":false"
 				<< ",\"terminalStyle\":\"straight\""
@@ -11919,7 +12100,7 @@ bool DuctworkGeometry::GetSelectedEmorySegmentState(std::string& outJson)
 			outJson = out.str();
 			return true;
 		}
-		outJson = "{\"ok\":true,\"available\":false,\"reason\":\"no-segment-selection\",\"canApplyWidth\":false,\"canApplyStroke\":false}";
+		outJson = "{\"ok\":true,\"available\":false,\"reason\":\"no-segment-selection\",\"canApplyWidth\":false,\"canApplyStroke\":false,\"hasCascadeStops\":false,\"isCascadeStopSegment\":false,\"canSetCascadeStop\":false,\"canClearCascadeStop\":false}";
 		return true;
 	}
 
@@ -12037,6 +12218,10 @@ bool DuctworkGeometry::GetSelectedEmorySegmentState(std::string& outJson)
 			<< ",\"mixedStrokeWidths\":" << (mixedStrokeWidths ? "true" : "false")
 			<< ",\"hasExplicitStart\":false"
 			<< ",\"canClearStart\":false"
+			<< ",\"hasCascadeStops\":false"
+			<< ",\"isCascadeStopSegment\":false"
+			<< ",\"canSetCascadeStop\":false"
+			<< ",\"canClearCascadeStop\":false"
 			<< ",\"centerlinesHidden\":false"
 			<< ",\"selectedThermostatCount\":" << selectedThermostatArts.size()
 			<< ",\"selectedSegmentIndex\":-1"
@@ -12089,6 +12274,8 @@ bool DuctworkGeometry::GetSelectedEmorySegmentState(std::string& outJson)
 	ReadSegmentWidths(sourceArt, segmentCount, defaultWidth, segmentWidths);
 	const int startSegmentIndex = ReadStartSegmentIndex(sourceArt, segmentCount);
 	const bool hasExplicitStart = HasExplicitStartSegmentIndex(sourceArt);
+	std::set<size_t> cascadeStopSegments;
+	ReadCascadeStopSegments(sourceArt, segmentCount, cascadeStopSegments);
 	if (!HasStoredSegmentWidths(sourceArt, segmentCount)) {
 		ApplyDefaultStraightChainTapers(sourceArt, points, startSegmentIndex, segmentWidths);
 	}
@@ -12125,6 +12312,9 @@ bool DuctworkGeometry::GetSelectedEmorySegmentState(std::string& outJson)
 		}
 	}
 
+	const bool selectedIsCascadeStop = selectedSegmentIndices.size() == 1 &&
+		cascadeStopSegments.find(static_cast<size_t>(selectedSegmentIndices[0])) != cascadeStopSegments.end();
+
 	std::ostringstream out;
 	out << "{\"ok\":true,\"available\":true"
 		<< ",\"sourceId\":\"" << JsonEscape(sourceId) << "\""
@@ -12134,10 +12324,14 @@ bool DuctworkGeometry::GetSelectedEmorySegmentState(std::string& outJson)
 		<< ",\"segmentCount\":" << segmentCount
 		<< ",\"startSegmentIndex\":" << startSegmentIndex
 		<< ",\"hasExplicitStart\":" << (hasExplicitStart ? "true" : "false")
+		<< ",\"hasCascadeStops\":" << (!cascadeStopSegments.empty() ? "true" : "false")
 		<< ",\"centerlinesHidden\":" << (IsCenterlineHidden(sourceArt) ? "true" : "false")
 		<< ",\"mixedWidths\":" << (mixedWidths ? "true" : "false")
 		<< ",\"mixedStrokeWidths\":" << (mixedStrokeWidths ? "true" : "false")
 		<< ",\"canSetStart\":" << (selectedSegmentIndices.size() == 1 ? "true" : "false")
+		<< ",\"isCascadeStopSegment\":" << (selectedIsCascadeStop ? "true" : "false")
+		<< ",\"canSetCascadeStop\":" << (selectedSegmentIndices.size() == 1 ? "true" : "false")
+		<< ",\"canClearCascadeStop\":" << (selectedIsCascadeStop ? "true" : "false")
 		<< ",\"isEndpointSelection\":";
 	if (selectedSegmentIndices.size() == 1) {
 		const int onlyIndex = selectedSegmentIndices[0];
@@ -13918,6 +14112,174 @@ bool DuctworkGeometry::ClearSelectedEmoryStartSegment(std::string& outMessage)
 	message << "Cleared the marked start. This run now defaults to segment 1 of " << segmentCount << ".";
 	if (widthsChanged) {
 		message << " Auto taper now flows from that default start.";
+	}
+	outMessage = message.str();
+	return true;
+}
+
+bool DuctworkGeometry::SetSelectedEmoryCascadeStopSegment(bool enabled, std::string& outMessage)
+{
+	outMessage = enabled
+		? "Select exactly one Emory duct segment to mark as a cascade stop."
+		: "Select the marked Emory cascade-stop segment first.";
+	if (!sAIArt) {
+		outMessage = "Illustrator SDK is not available.";
+		return false;
+	}
+
+	NormalizeDuplicateEmorySourceIds();
+
+	std::vector<AIArtHandle> selection;
+	DuctworkSelection::CollectSelectedPaths(selection);
+	if (selection.empty()) {
+		return false;
+	}
+
+	AIArtHandle selectedSegment = nullptr;
+	std::string sourceId;
+	int selectedSegmentIndex = -1;
+	std::string selectedSegmentKey;
+	for (size_t i = 0; i < selection.size(); ++i) {
+		AIArtHandle art = selection[i];
+		if (!art) {
+			continue;
+		}
+
+		std::string role;
+		if (!DuctworkMetadata::GetString(art, kEmoryRoleKey, role) || role != kEmoryRoleSegment) {
+			continue;
+		}
+
+		std::string artSourceId;
+		if (!DuctworkMetadata::GetString(art, kEmorySourceIdKey, artSourceId) || artSourceId.empty()) {
+			artSourceId = ReadEmorySourceIdFromNote(art);
+		}
+		if (artSourceId.empty()) {
+			continue;
+		}
+
+		int segmentIndex = -1;
+		if (!ReadGeneratedSegmentIndex(art, segmentIndex)) {
+			continue;
+		}
+
+		std::ostringstream segmentKeyStream;
+		segmentKeyStream << artSourceId << "#" << segmentIndex;
+		const std::string segmentKey = segmentKeyStream.str();
+		if (!selectedSegmentKey.empty() && segmentKey != selectedSegmentKey) {
+			outMessage = enabled
+				? "Select only one Emory duct segment to mark as a cascade stop."
+				: "Select only one Emory duct segment to clear its cascade-stop mark.";
+			return false;
+		}
+
+		selectedSegment = art;
+		sourceId = artSourceId;
+		selectedSegmentIndex = segmentIndex;
+		selectedSegmentKey = segmentKey;
+	}
+
+	if (!selectedSegment || sourceId.empty() || selectedSegmentIndex < 0) {
+		return false;
+	}
+
+	std::vector<EmorySourceState> states;
+	std::map<std::string, int> stateIndexBySourceId;
+	CollectEmorySourceStates(states, stateIndexBySourceId);
+
+	AIArtHandle sourceArt = nullptr;
+	DuctworkPath sourcePath;
+	int selectedStateIndex = -1;
+	if (!states.empty() &&
+		(FindBestStateIndexForGeneratedArt(selectedSegment, kEmoryRoleSegment, sourceId, states, selectedStateIndex) ||
+		 FindBestStateIndexForGeneratedArtLoose(selectedSegment, kEmoryRoleSegment, states, selectedStateIndex)) &&
+		selectedStateIndex >= 0 &&
+		selectedStateIndex < static_cast<int>(states.size())) {
+		sourceArt = states[selectedStateIndex].art;
+		sourcePath = states[selectedStateIndex].path;
+	} else if (!FindSourceArtForSourceId(sourceId, sourceArt, sourcePath)) {
+		outMessage = "Unable to find the source centerline for the selected duct segment.";
+		return false;
+	}
+
+	std::vector<DuctworkPoint> points;
+	SanitizePolyline(sourcePath.points, points);
+	AIArtHandle canonicalArt = sourceArt;
+	std::vector<DuctworkPoint> canonicalPoints = points;
+	int canonicalSelectedSegmentIndex = selectedSegmentIndex;
+
+	AIArtHandle backupArt = nullptr;
+	DuctworkPath backupPath;
+	if (GetPrimaryBackupCenterlineForSourceId(sourceId, backupArt, backupPath)) {
+		std::vector<int> backupIndices;
+		if (MapFragmentSegmentsToBackupIndices(points, backupPath.points, backupIndices) &&
+			selectedSegmentIndex >= 0 &&
+			selectedSegmentIndex < static_cast<int>(backupIndices.size()) &&
+			backupIndices[selectedSegmentIndex] >= 0) {
+			canonicalArt = backupArt;
+			canonicalPoints = backupPath.points;
+			canonicalSelectedSegmentIndex = backupIndices[selectedSegmentIndex];
+		}
+	}
+
+	const size_t segmentCount = canonicalPoints.size() > 1 ? (canonicalPoints.size() - 1) : 0;
+	const size_t visibleSegmentCount = points.size() > 1 ? (points.size() - 1) : 0;
+	if (segmentCount == 0 || visibleSegmentCount == 0) {
+		outMessage = "The selected run has no segments.";
+		return false;
+	}
+	if (canonicalSelectedSegmentIndex < 0 || canonicalSelectedSegmentIndex >= static_cast<int>(segmentCount)) {
+		outMessage = "The selected segment is out of range for this run.";
+		return false;
+	}
+
+	std::set<size_t> cascadeStops;
+	ReadCascadeStopSegments(canonicalArt, segmentCount, cascadeStops);
+	const size_t canonicalIndex = static_cast<size_t>(canonicalSelectedSegmentIndex);
+	const bool alreadyMarked = cascadeStops.find(canonicalIndex) != cascadeStops.end();
+	if (enabled) {
+		cascadeStops.insert(canonicalIndex);
+	} else {
+		if (!alreadyMarked) {
+			outMessage = "The selected segment is not marked as a cascade stop.";
+			return false;
+		}
+		cascadeStops.erase(canonicalIndex);
+	}
+	WriteCascadeStopSegments(canonicalArt, cascadeStops);
+
+	std::set<std::string> sourceIdsToLocalize;
+	sourceIdsToLocalize.insert(sourceId);
+	if (canonicalArt == backupArt) {
+		LocalizeVisibleFragmentMetadataFromBackup(sourceIdsToLocalize, true);
+	}
+
+	std::vector<DuctworkPath> regeneratePaths;
+	std::vector<EmorySourceState> regenerateStates;
+	std::map<std::string, int> regenerateIndexBySourceId;
+	if (CollectEmorySourceStates(regenerateStates, regenerateIndexBySourceId)) {
+		for (size_t i = 0; i < regenerateStates.size(); ++i) {
+			if (regenerateStates[i].sourceId == sourceId) {
+				regeneratePaths.push_back(regenerateStates[i].path);
+			}
+		}
+	}
+	if (regeneratePaths.empty()) {
+		regeneratePaths.push_back(sourcePath);
+	}
+	std::vector<std::string> sourceIds(1, sourceId);
+	DeleteGeneratedEmoryBodies(sourceIds);
+	GenerateEmoryBodies(regeneratePaths);
+
+	SelectGeneratedSegmentBySourceIdAndIndex(sourceId, selectedSegmentIndex);
+
+	std::ostringstream message;
+	if (enabled) {
+		message << "Cascade stop marked on segment " << (selectedSegmentIndex + 1)
+			<< " of " << visibleSegmentCount << ". Size changes will not pass through that segment.";
+	} else {
+		message << "Cascade stop cleared from segment " << (selectedSegmentIndex + 1)
+			<< " of " << visibleSegmentCount << ".";
 	}
 	outMessage = message.str();
 	return true;

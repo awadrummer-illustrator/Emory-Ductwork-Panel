@@ -60,6 +60,7 @@ namespace DuctworkGeometry
 	bool SelectSelectedEmoryFinalSegments(std::string& outMessage);
 	bool SetSelectedEmoryStartSegment(std::string& outMessage);
 	bool ClearSelectedEmoryStartSegment(std::string& outMessage);
+	bool SetSelectedEmoryCascadeStopSegment(bool enabled, std::string& outMessage);
 	bool ApplySelectedEmorySegmentWidth(double newWidth, std::string& outMessage);
 	bool ApplySelectedEmoryStrokeWidth(double newWidth, std::string& outMessage, bool includeThermostatLines = true);
 }
